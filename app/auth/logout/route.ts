@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
+import { clearAuthCookies } from "@/lib/supabase-auth-core";
 
 export async function GET(request: Request) {
   const response = NextResponse.redirect(new URL("/login", request.url));
-  response.cookies.delete("sb-access-token");
-  response.cookies.delete("sb-refresh-token");
+  clearAuthCookies(response);
   return response;
 }

@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { fetchSupabaseUser } from "@/lib/supabase-auth";
+import {
+  clearAuthCookies,
+  fetchSupabaseUser,
+  setAuthCookies
+} from "@/lib/supabase-auth-core";
 
 type SessionPayload = {
   access_token?: string;
@@ -17,33 +21,26 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: "missing token" }, { status: 400 });
   }
 
-  const user = await fetchSupabaseUser(accessToken);
-  if (!user) {
+  const userCheck = await fetchSupabaseUser(accessToken);
+  if (!userCheck.ok) {
+    if (userCheck.reason === "network_error" || userCheck.reason === "auth_server_error") {
+      return NextResponse.json({ ok: false, error: "auth service unavailable" }, { status: 503 });
+    }
     return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
   }
 
   const response = NextResponse.json({ ok: true });
-  const secure = process.env.NODE_ENV === "production";
-  response.cookies.set("sb-access-token", accessToken, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure,
-    path: "/",
-    maxAge: Number.isFinite(expiresIn) ? Math.max(60, expiresIn) : 3600
-  });
-  response.cookies.set("sb-refresh-token", refreshToken, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30
+  await setAuthCookies(response, {
+    accessToken,
+    refreshToken,
+    expiresIn: Number.isFinite(expiresIn) ? Math.max(60, Math.floor(expiresIn)) : 3600,
+    user: userCheck.user
   });
   return response;
 }
 
 export async function DELETE() {
   const response = NextResponse.json({ ok: true });
-  response.cookies.delete("sb-access-token");
-  response.cookies.delete("sb-refresh-token");
+  clearAuthCookies(response);
   return response;
 }
