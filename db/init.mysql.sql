@@ -1,0 +1,291 @@
+CREATE TABLE IF NOT EXISTS datasets (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  name VARCHAR(255) NOT NULL UNIQUE,
+  description TEXT NOT NULL,
+  created_by VARCHAR(255) NOT NULL DEFAULT 'shesl-meow',
+  updated_by VARCHAR(255) NOT NULL DEFAULT 'shesl-meow',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS data_items (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  dataset_id CHAR(36) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  environment_snapshot JSON NOT NULL,
+  user_input TEXT NOT NULL,
+  agent_trajectory JSON,
+  agent_output JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  trace_id VARCHAR(255),
+  snapshot_id CHAR(36),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_data_items_dataset
+    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS snapshot_presets (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  preset_key VARCHAR(255) NOT NULL UNIQUE,
+  name VARCHAR(255) NOT NULL,
+  payload JSON NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS evaluators (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  evaluator_key VARCHAR(255) NOT NULL UNIQUE,
+  name VARCHAR(255) NOT NULL,
+  prompt_template TEXT NOT NULL,
+  base_url VARCHAR(1024) NOT NULL DEFAULT 'https://api.openai.com/v1',
+  model_name VARCHAR(255) NOT NULL DEFAULT 'gpt-4.1-mini',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS traces (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  trace_id VARCHAR(255),
+  span_id VARCHAR(255),
+  parent_span_id VARCHAR(255),
+  name VARCHAR(255) NOT NULL,
+  service_name VARCHAR(255),
+  attributes JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  start_time DATETIME,
+  end_time DATETIME,
+  status VARCHAR(100),
+  raw JSON NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS experiments (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  name VARCHAR(255) NOT NULL,
+  dataset_id CHAR(36) NOT NULL,
+  agent_version VARCHAR(255) NOT NULL,
+  status VARCHAR(100) NOT NULL DEFAULT 'draft',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_experiments_dataset
+    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS experiment_runs (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  experiment_id CHAR(36) NOT NULL,
+  status VARCHAR(100) NOT NULL DEFAULT 'running',
+  started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at DATETIME,
+  summary JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  CONSTRAINT fk_experiment_runs_experiment
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS run_item_results (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  run_id CHAR(36) NOT NULL,
+  data_item_id CHAR(36) NOT NULL,
+  environment_build_status VARCHAR(255) NOT NULL,
+  input_delivery_status VARCHAR(255) NOT NULL,
+  agent_trajectory JSON NOT NULL,
+  agent_output JSON NOT NULL,
+  judge_scores JSON NOT NULL,
+  final_score DOUBLE NOT NULL,
+  logs TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_run_item_results_run
+    FOREIGN KEY (run_id) REFERENCES experiment_runs(id) ON DELETE CASCADE,
+  CONSTRAINT fk_run_item_results_data_item
+    FOREIGN KEY (data_item_id) REFERENCES data_items(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- >>> seed data begin
+-- Seed snapshot presets
+INSERT INTO snapshot_presets (preset_key, name, payload) VALUES ('web_default', 'Web 浏览器环境', '{"platform":"web","browser":"chromium","network":"online","locale":"zh-CN"}')
+ON DUPLICATE KEY UPDATE name = VALUES(name), payload = VALUES(payload);
+
+INSERT INTO snapshot_presets (preset_key, name, payload) VALUES ('repo_node', '代码仓库环境', '{"platform":"repo","os":"ubuntu-22.04","runtime":"node18","tools":["git","npm"]}')
+ON DUPLICATE KEY UPDATE name = VALUES(name), payload = VALUES(payload);
+
+INSERT INTO snapshot_presets (preset_key, name, payload) VALUES ('ubuntu_terminal', 'Ubuntu 终端环境', '{"platform":"ubuntu","version":"22.04","shell":"bash","network":"restricted"}')
+ON DUPLICATE KEY UPDATE name = VALUES(name), payload = VALUES(payload);
+
+-- Seed evaluators
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name) VALUES ('task_success', '任务成功', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
+
+        <评判标准>
+        请忽略工具参数的具体设置，合适的工具应满足：
+        1. 工具的功能和问题需求相符，调用该工具应能有效且完全解决问题，就是 1 分。
+        2. 工具在当前可调用工具列表中，不是虚构或无效的工具，否则0分。
+        3. 调用的工具中有不符合用户意图的，整体工具选择即被视为错误(0分)。
+        4.	允许“等价工具”替代（例如点击“搜索”按钮 vs 按 Enter 提交），但需合理，比如：
+          	- 提交搜索：hotkey(enter) ⇆ 点击页面“Search/提交”按钮。
+	          - 打开应用/文件：left_double_click ⇆ click（在可见“打开”按钮后再 click）。
+	          - 滚动页面：scroll ⇆ hotkey(PageDown/Space)（如上下文明确可行）。
+	          - 上下文菜单操作：right_click + 菜单项点击 ⇆ 直接点击显式的“下载/打开”按钮（两者择一即可）。
+            注：若使用了功能等价但效率更低的工具导致动作执行次数不必要的增多(比如轨迹中出现超过3次低效选择工具)，则给0.5分。
+        </评判标准>
+
+        <输入>
+        [轨迹]：
+```json
+{{trajectory}}
+```
+        [Agent输出]
+```json
+{{agent_output}}
+```
+        [可调用工具列表]：
+```json
+{{tools}}
+```
+        </输入>
+        
+        <思考指导>
+        首先，请通过查看输入的上下文理解用户的真实意图。如果输入中没有明确表达意图，请尝试从上下文或消息内容中合理推断。一旦你理解了目标，请严格根据评判标准分析助手的工具选择是否合适。
+        另外，注意一些细节：
+          - 忽略参数但不忽略工具类型与时机（例如在地址栏输入 URL 应使用 type，提交可 hotkey(enter) 或点击“Search”）。
+	        - 冗余（重复 type/enter/wait）不影响正确/错误
+	        - 早/晚调用：在任务未完成时调用 output/finished → 视为与意图冲突。
+	        - 受阻求助：页面无响应或权限限制时，call_user 合理；若无阻碍却滥用 → 记为问题。
+	        - 若实际去调用 login → 捏造工具（硬失败）；
+	        - 若出现真实登录表单但未调用 login、改用 type 输入账号密码 → 策略红线（硬失败）。
+	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://api.openai.com/v1', 'gpt-4.1-mini')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name) VALUES ('trajectory_quality', '轨迹质量', '你是一名专业的数据标注员/审稿员，专门评估计算机使用类（CUA）Agent的交互轨迹是否逻辑正确、推进清晰、目标达成。你将收到一段包含系统指令、用户目标、Agent 的思考（thought，可选）、动作（function calls）与若干屏幕截图的轨迹。
+        
+        <评分标准>
+        请先给出六个子分（0~1），再折算到总分，并映射到三档标注（1.0 / 0.5 / 0.0）。
+	      1.	目标达成 (30%)
+	        - 1：确实实现任务目标（一般需要参考最后一个message里是否调用了finished的function call，以及其thought入参里的CUA Agent Model给出的判断结论）。
+	        - 0.5：实现部分目标或极其接近，但证据不足以确认完全成功。
+          - 0：未实现。
+          注意：如果最后一个message为call_user的function call，一般表示CUA判断用户的目标完成不了(关键信息缺失或者天然完成不了等 e.g. 用户让CUA在某个页面找一个按钮，但是这个页面确实没有，那很有可能最后一步返回了call_user的function call来反问用户进一步确认信息)，这种情况需要综合判断call_user的函数调用里的thought的内容，只要反问用户的要求合理，确实符合实际情况，也判定为任务目标成功实现。
+	      2.	逻辑连贯 (20%)
+	        - 1：每步动作都可由上一步状态合理推出（含坐标/控件/路径匹配）；无自相矛盾。
+	        - 0.5：偶有可疑处，但总体能解释。
+	        - 0：明显不合逻辑（点不存在的控件、菜单路径明显错误等）。
+	      3.	推进性/因果可见 (20%)
+	        - 1：大多数动作后有可见的环境变化（新页面、对话框、结果区更新、下载条等）。
+	        - 0.5：有推进但证据稀薄（长时间 wait、多次重复无新证据）。
+	        - 0：基本无推进或循环空转。
+	      4.	状态对齐/无幻觉 (10%)
+	        - 1：动作与截图内容相互印证（例如点击“下载”后出现系统下载提示或文件栏变化）。
+	        - 0.5：对齐大体正确但细节未能核对。
+	        - 0：出现 UI 幻觉（点击了截图中不存在/不可见的控件、捏造菜单）。
+	      5.	步骤经济性 (10%)
+	        - 1：无冗余或极少冗余（必要 wait 计为合理）。
+          - 0.5：存在多余步骤（重复 wait/重复点击）但不影响达成。
+	        - 0：明显拖沓、频繁重复无效动作。
+	      6.	合规/策略遵循 (10%)
+	        - 1：严格遵循系统策略（如登录使用 login()，并声明“模型不操作账密；由 AICC 完成登录”）。
+	        - 0.5：轻微偏差（文案缺失但未实际违规）。
+	        - 0：违反关键策略（自行输入/操作账号密码、触发高风险动作等）。
+        最后总分计算：
+        总分 = 0.3*目标达成 + 0.2*逻辑连贯 + 0.2*推进性 + 0.1*状态对齐 + 0.1*步骤经济性 + 0.1*合规
+        映射至三档：
+	      1. >=0.9 → 1.0
+        2. 0.6~<0.9 → 0.5
+	      3. <0.6 → 0.0
+
+        <输入>
+        [轨迹]：
+```json
+{{trajectory}}
+```
+        [Agent输出]
+```json
+{{agent_output}}
+```
+        [可调用工具列表]：
+```json
+{{tools}}
+```
+        </输入>
+        
+        <思考指导>
+        评估对象在这里强调一下
+          1. 轨迹：一个按时间顺序排列的消息列表 messages（头一个message为system，第二个message为user输入的任务指令，之后的便是CUA执行任务的轨迹信息了。有时第三个message为user输入的截屏有时可能直接为role为model的轨迹beginning）。
+	        2. 动作：主要体现为函数调用（如：click/left_double_click/type/wait/login 等）。
+	        3. 截图：role为user的输入里，以 image_url 形式出现，代表每次CU(Computor Use)动作执行后的环境状态（若动作后无截图，使用最接近的下一张作为“结果”）。
+        首先，请通过查看输入内容，来理解该轨迹的目标、路径和结果。一旦你理解了目标，请一步步思考，根据该轨迹实现该目标的程度进行评分。
+        </思考指导>', 'https://api.openai.com/v1', 'gpt-4.1-mini')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name) VALUES ('tool_selection_quality', '工具选择质量', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
+
+        <评判标准>
+        请忽略工具参数的具体设置，合适的工具应满足：
+        1. 工具的功能和问题需求相符，调用该工具应能有效且完全解决问题，就是 1 分。
+        2. 工具在当前可调用工具列表中，不是虚构或无效的工具，否则0分。
+        3. 调用的工具中有不符合用户意图的，整体工具选择即被视为错误(0分)。
+        4.	允许“等价工具”替代（例如点击“搜索”按钮 vs 按 Enter 提交），但需合理，比如：
+          	- 提交搜索：hotkey(enter) ⇆ 点击页面“Search/提交”按钮。
+	          - 打开应用/文件：left_double_click ⇆ click（在可见“打开”按钮后再 click）。
+	          - 滚动页面：scroll ⇆ hotkey(PageDown/Space)（如上下文明确可行）。
+	          - 上下文菜单操作：right_click + 菜单项点击 ⇆ 直接点击显式的“下载/打开”按钮（两者择一即可）。
+            注：若使用了功能等价但效率更低的工具导致动作执行次数不必要的增多(比如轨迹中出现超过3次低效选择工具)，则给0.5分。
+        </评判标准>
+
+        <输入>
+        [轨迹]：
+```json
+{{trajectory}}
+```
+        [Agent输出]
+```json
+{{agent_output}}
+```
+        [可调用工具列表]：
+```json
+{{tools}}
+```
+        </输入>        
+        <思考指导>
+        首先，请通过查看输入的上下文理解用户的真实意图。如果输入中没有明确表达意图，请尝试从上下文或消息内容中合理推断。一旦你理解了目标，请严格根据评判标准分析助手的工具选择是否合适。
+        另外，注意一些细节：
+          - 忽略参数但不忽略工具类型与时机（例如在地址栏输入 URL 应使用 type，提交可 hotkey(enter) 或点击“Search”）。
+	        - 冗余（重复 type/enter/wait）不影响正确/错误
+	        - 早/晚调用：在任务未完成时调用 output/finished → 视为与意图冲突。
+	        - 受阻求助：页面无响应或权限限制时，call_user 合理；若无阻碍却滥用 → 记为问题。
+	        - 若实际去调用 login → 捏造工具（硬失败）；
+	        - 若出现真实登录表单但未调用 login、改用 type 输入账号密码 → 策略红线（硬失败）。
+	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://api.openai.com/v1', 'gpt-4.1-mini')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name) VALUES ('tool_params', '工具参数', '请将AI 助手生成的工具调用中提取的参数与下方提供的 JSON 进行比较，一步步思考，以判断生成的调用是否从问题中提取了完全正确的参数。 [工具定义列表]中给出了当前调用工具的信息，包括工具作用、所需参数等信息。
+
+        <评判标准>
+        只有当工具调用中的所有参数均与输入中提供的[工具定义列表]中完全一致，且只提供了相关的信息，才视为“正确”。例如：
+
+        - 所有必需参数（required parameters）必须完整提供；
+        - 参数名必须跟[工具定义列表]中完全一致；
+        - 不得包含[工具定义列表]中未定义的参数；
+        - 参数类型必须与[工具定义列表]中定义的类型一致；
+        - 所有参数的值必须根据上下文正确地填写，不能凭空捏造，必须和意图一致；
+        - 不允许生成任何虚构信息（hallucination）；
+        - 若未提供的参数为可选参数（optional），且[工具定义列表]中有默认值，则默认使用即可，不视为错误。
+
+        </评判标准>
+
+        <输入>
+        [轨迹]：
+```json
+{{trajectory}}
+```
+        [Agent输出]
+```json
+{{agent_output}}
+```
+        [可调用工具列表]：
+```json
+{{tools}}
+```
+        </输入>
+        
+        <思考指导>
+        首先，请通过查看输入的上下文理解用户的真实意图。如果输入中没有明确表达意图，请尝试从上下文或消息内容中合理推断。一旦你理解了目标，再将每个参数结合意图，一步步分析是否填写正确。
+        对于参数值，一个一个列出来，然后检查参数值是不是在上下文中真的有提到，且符合意图。根据Prompt 中的评判标准一步步思考、分析，满足评判标准就是 1 分，否则就是 0 分。
+        评估的对象也包含[历史轨迹中的工具调用]
+        </思考指导>', 'https://api.openai.com/v1', 'gpt-4.1-mini')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
