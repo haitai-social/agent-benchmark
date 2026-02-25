@@ -1,19 +1,23 @@
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { requireUser } from "@/lib/supabase-auth";
 import Link from "next/link";
 import { FilterIcon, FlaskIcon, PlusIcon, RefreshIcon, SearchIcon } from "../components/icons";
 
 async function createExperiment(formData: FormData) {
   "use server";
+  const user = await requireUser();
+
   const name = String(formData.get("name") ?? "").trim();
   const datasetId = String(formData.get("datasetId") ?? "").trim();
   const agentVersion = String(formData.get("agentVersion") ?? "v1").trim();
   if (!name || !datasetId) return;
 
-  await dbQuery(`INSERT INTO experiments (name, dataset_id, agent_version, status) VALUES ($1,$2,$3,'ready')`, [
+  await dbQuery(`INSERT INTO experiments (name, dataset_id, agent_version, status, created_by, updated_by) VALUES ($1,$2,$3,'ready',$4,$4)`, [
     name,
     datasetId,
-    agentVersion
+    agentVersion,
+    user.id
   ]);
   revalidatePath("/experiments");
 }
@@ -23,6 +27,8 @@ export default async function ExperimentsPage({
 }: {
   searchParams: Promise<{ q?: string; dataset?: string; status?: string; panel?: string }>;
 }) {
+  await requireUser();
+
   const { q = "", dataset = "all", status = "all", panel = "none" } = await searchParams;
   const qv = q.trim();
   const creating = panel === "create";

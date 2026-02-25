@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
 import { parseJsonOrWrap } from "@/lib/safe-json";
+import { requireUser } from "@/lib/supabase-auth";
 import {
   ArrowLeftIcon,
   DatasetIcon,
@@ -15,6 +16,8 @@ import {
 
 async function createItem(formData: FormData) {
   "use server";
+  const user = await requireUser();
+
   const datasetId = String(formData.get("datasetId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const snapshotId = String(formData.get("snapshotId") ?? "").trim();
@@ -39,8 +42,8 @@ async function createItem(formData: FormData) {
 
   await dbQuery(
     `INSERT INTO data_items (
-      dataset_id, name, environment_snapshot, user_input, agent_trajectory, agent_output, trace_id, snapshot_id, updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CURRENT_TIMESTAMP)`,
+      dataset_id, name, environment_snapshot, user_input, agent_trajectory, agent_output, trace_id, snapshot_id, created_by, updated_by, updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,CURRENT_TIMESTAMP)`,
     [
       datasetId,
       name,
@@ -49,11 +52,12 @@ async function createItem(formData: FormData) {
       JSON.stringify(finalTrajectory),
       JSON.stringify(parseJsonOrWrap(agentOutput)),
       traceId || null,
-      snapshotId
+      snapshotId,
+      user.id
     ]
   );
 
-  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = 'shesl-meow' WHERE id = $1`, [datasetId]);
+  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1`, [datasetId, user.id]);
 
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
@@ -63,17 +67,21 @@ async function createItem(formData: FormData) {
 
 async function deleteItem(formData: FormData) {
   "use server";
+  const user = await requireUser();
+
   const id = String(formData.get("id") ?? "");
   const datasetId = String(formData.get("datasetId") ?? "");
   if (!id) return;
   await dbQuery(`DELETE FROM data_items WHERE id = $1`, [id]);
-  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = 'shesl-meow' WHERE id = $1`, [datasetId]);
+  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1`, [datasetId, user.id]);
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
 }
 
 async function updateItem(formData: FormData) {
   "use server";
+  const user = await requireUser();
+
   const datasetId = String(formData.get("datasetId") ?? "");
   const itemId = String(formData.get("itemId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -106,6 +114,7 @@ async function updateItem(formData: FormData) {
          agent_output = $7,
          trace_id = $8,
          snapshot_id = $9,
+         updated_by = $10,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND dataset_id = $2`,
     [
@@ -117,11 +126,12 @@ async function updateItem(formData: FormData) {
       JSON.stringify(finalTrajectory),
       JSON.stringify(parseJsonOrWrap(agentOutput)),
       traceId || null,
-      snapshotId
+      snapshotId,
+      user.id
     ]
   );
 
-  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = 'shesl-meow' WHERE id = $1`, [datasetId]);
+  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1`, [datasetId, user.id]);
 
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
@@ -136,6 +146,8 @@ export default async function DatasetDetailPage({
   params: Promise<{ id: string }>;
   searchParams: Promise<{ q?: string; add?: string; edit?: string }>;
 }) {
+  await requireUser();
+
   const { id } = await params;
   const { q = "", add = "0", edit = "" } = await searchParams;
   const qv = q.trim();
@@ -211,7 +223,7 @@ export default async function DatasetDetailPage({
             <span className="meta-pill">更新时间: {new Date(dataset.updated_at).toLocaleString()}</span>
             <span className="meta-pill">创建时间: {new Date(dataset.created_at).toLocaleString()}</span>
             <span className="meta-pill">
-              <UserIcon width={14} height={14} /> {dataset.created_by}
+              <UserIcon width={14} height={14} /> {dataset.created_by.slice(0, 8)}
             </span>
           </div>
         </section>

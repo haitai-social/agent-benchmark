@@ -13,7 +13,7 @@ function isEnvBuildable(snapshot: unknown) {
   return false;
 }
 
-export async function runExperiment(experimentId: string) {
+export async function runExperiment(experimentId: string, triggeredBy: string) {
   try {
     return await withTransaction(async (tx) => {
       const exp = await tx.query<{
@@ -34,8 +34,8 @@ export async function runExperiment(experimentId: string) {
 
       const runId = crypto.randomUUID();
       await tx.query(
-        `INSERT INTO experiment_runs (id, experiment_id, status) VALUES ($1, $2, 'running')`,
-        [runId, experimentId]
+        `INSERT INTO experiment_runs (id, experiment_id, status, triggered_by) VALUES ($1, $2, 'running', $3)`,
+        [runId, experimentId, triggeredBy]
       );
 
       const items = await tx.query<{

@@ -2,6 +2,7 @@ import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
 import { ingestTracePayload } from "@/lib/otel";
 import { parseJsonOrWrap } from "@/lib/safe-json";
+import { requireUser } from "@/lib/supabase-auth";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
@@ -32,6 +33,8 @@ function toDatetimeLocal(value: string | null) {
 
 async function ingestManualTrace(formData: FormData) {
   "use server";
+  await requireUser();
+
   const payloadRaw = String(formData.get("payload") ?? "{}");
   const q = String(formData.get("q") ?? "").trim();
   const service = String(formData.get("service") ?? "all").trim() || "all";
@@ -54,6 +57,8 @@ async function ingestManualTrace(formData: FormData) {
 
 async function updateTrace(formData: FormData) {
   "use server";
+  await requireUser();
+
   const id = String(formData.get("id") ?? "").trim();
   const traceId = String(formData.get("traceId") ?? "").trim();
   const spanId = String(formData.get("spanId") ?? "").trim();
@@ -107,6 +112,8 @@ async function updateTrace(formData: FormData) {
 
 async function deleteTrace(formData: FormData) {
   "use server";
+  await requireUser();
+
   const id = String(formData.get("id") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
   const service = String(formData.get("service") ?? "all").trim() || "all";
@@ -123,6 +130,8 @@ export default async function TracesPage({
 }: {
   searchParams: Promise<{ q?: string; service?: string; panel?: string; id?: string; result?: string; inserted?: string; message?: string }>;
 }) {
+  await requireUser();
+
   const { q = "", service = "all", panel = "none", id = "", result = "", inserted = "", message = "" } = await searchParams;
   const qv = q.trim();
   const ingesting = panel === "ingest";

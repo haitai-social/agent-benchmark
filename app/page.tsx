@@ -1,7 +1,10 @@
 import { dbQuery } from "@/lib/db";
+import { requireUser } from "@/lib/supabase-auth";
 import { DatasetIcon, FlaskIcon, JudgeIcon, TraceIcon } from "./components/icons";
 
 export default async function HomePage() {
+  await requireUser();
+
   const [datasets, items, evaluators, experiments, runs, traces] = await Promise.all([
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM datasets"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM data_items"),

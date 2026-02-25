@@ -1,25 +1,29 @@
 import Link from "next/link";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
-import { FilterIcon, PlusIcon, RefreshIcon, SearchIcon, UserIcon } from "../components/icons";
+import { requireUser } from "@/lib/supabase-auth";
+import { FilterIcon, PlusIcon, RefreshIcon, SearchIcon } from "../components/icons";
 
 async function createDataset(formData: FormData) {
   "use server";
+  const user = await requireUser();
+
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
-  const createdBy = String(formData.get("createdBy") ?? "shesl-meow").trim() || "shesl-meow";
   if (!name) return;
   await dbQuery(
     `INSERT INTO datasets (name, description, created_by, updated_by, updated_at)
      SELECT $1, $2, $3, $3, CURRENT_TIMESTAMP
      WHERE NOT EXISTS (SELECT 1 FROM datasets WHERE name = $4)`,
-    [name, description, createdBy, name]
+    [name, description, user.id, name]
   );
   revalidatePath("/datasets");
 }
 
 async function deleteDataset(formData: FormData) {
   "use server";
+  await requireUser();
+
   const id = String(formData.get("id") ?? "");
   if (!id) return;
   await dbQuery(`DELETE FROM datasets WHERE id = $1`, [id]);
@@ -29,9 +33,11 @@ async function deleteDataset(formData: FormData) {
 export default async function DatasetsPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; creator?: string; panel?: string }>;
+  searchParams: Promise<{ q?: string; panel?: string }>;
 }) {
-  const { q = "", creator = "all", panel = "none" } = await searchParams;
+  await requireUser();
+
+  const { q = "", panel = "none" } = await searchParams;
   const queryText = q.trim();
   const creating = panel === "create";
 
@@ -55,14 +61,12 @@ export default async function DatasetsPage({
      FROM datasets d
      LEFT JOIN data_items i ON i.dataset_id = d.id
      WHERE ($1 = '' OR LOWER(d.name) LIKE CONCAT('%', LOWER($2), '%'))
-       AND ($3 = 'all' OR d.created_by = $3)
      GROUP BY d.id, d.name, d.description, d.created_by, d.updated_by, d.updated_at
      ORDER BY d.updated_at DESC`,
-    [queryText, queryText, creator]
+    [queryText, queryText]
   );
 
-  const creators = Array.from(new Set(rows.map((r) => r.created_by)));
-  const listHref = `/datasets${queryText || creator !== "all" ? `?${new URLSearchParams({ ...(queryText ? { q: queryText } : {}), ...(creator !== "all" ? { creator } : {}) }).toString()}` : ""}`;
+  const listHref = `/datasets${queryText ? `?${new URLSearchParams({ q: queryText }).toString()}` : ""}`;
   const createHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=create`;
 
   return (
@@ -78,17 +82,6 @@ export default async function DatasetsPage({
           <label className="input-icon-wrap">
             <SearchIcon width={16} height={16} />
             <input name="q" defaultValue={queryText} placeholder="搜索名称" />
-          </label>
-          <label className="input-icon-wrap">
-            <UserIcon width={16} height={16} />
-            <select name="creator" defaultValue={creator}>
-              <option value="all">搜索创建人</option>
-              {creators.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
           </label>
           <button type="submit" className="ghost-btn">
             <FilterIcon width={16} height={16} /> 筛选
@@ -137,7 +130,7 @@ export default async function DatasetsPage({
                 <td>{row.item_count}</td>
                 <td>-</td>
                 <td className="muted">{row.description || "-"}</td>
-                <td>{row.updated_by}</td>
+                <td>{row.updated_by.slice(0, 8)}</td>
                 <td>{new Date(row.updated_at).toLocaleString()}</td>
                 <td>
                   <div className="row-actions">
@@ -172,7 +165,6 @@ export default async function DatasetsPage({
               <p className="muted">创建新的评测集，用于承载 data items 与后续实验运行。</p>
               <form action={createDataset} className="menu-form">
                 <input name="name" placeholder="评测集名称" required />
-                <input name="createdBy" placeholder="创建人" defaultValue="shesl-meow" />
                 <textarea name="description" placeholder="描述" />
                 <button type="submit">创建</button>
               </form>

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { Sidebar } from "./components/sidebar";
+import { getCurrentUser } from "@/lib/supabase-auth";
+import { AppShell } from "./components/app-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -7,14 +8,13 @@ export const metadata: Metadata = {
   description: "Benchmark 管理/运行平台"
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const user = await getCurrentUser();
+
   return (
     <html lang="zh-CN">
       <body>
-        <div className="app-shell">
-          <Sidebar />
-          <section className="content-area">{children}</section>
-        </div>
+        <AppShell user={user}>{children}</AppShell>
       </body>
     </html>
   );

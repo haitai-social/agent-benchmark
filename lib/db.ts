@@ -153,75 +153,11 @@ async function executeSqlScript(sql: string) {
   }
 }
 
-function toCount(value: unknown) {
-  if (typeof value === "number") return value;
-  if (typeof value === "string") return Number(value);
-  return 0;
-}
-
-async function ensureMySqlColumn(tableName: string, columnName: string, alterSql: string) {
-  const result = await executeQuery<{ c: number | string }>(
-    `SELECT COUNT(*) AS c
-     FROM INFORMATION_SCHEMA.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = $1 AND COLUMN_NAME = $2`,
-    [tableName, columnName]
-  );
-
-  if (toCount(result.rows[0]?.c) === 0) {
-    await executeQuery(alterSql);
-  }
-}
-
-async function ensureMySqlSchemaCompatibility() {
-  await ensureMySqlColumn(
-    "datasets",
-    "created_by",
-    "ALTER TABLE datasets ADD COLUMN created_by VARCHAR(255) NOT NULL DEFAULT 'shesl-meow'"
-  );
-  await ensureMySqlColumn(
-    "datasets",
-    "updated_by",
-    "ALTER TABLE datasets ADD COLUMN updated_by VARCHAR(255) NOT NULL DEFAULT 'shesl-meow'"
-  );
-  await ensureMySqlColumn(
-    "datasets",
-    "updated_at",
-    "ALTER TABLE datasets ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
-  );
-}
-
-async function ensurePostgresColumnNullable(tableName: string, columnName: string, alterSql: string) {
-  const result = await executeQuery<{ is_nullable: string }>(
-    `SELECT is_nullable
-     FROM information_schema.columns
-     WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
-     LIMIT 1`,
-    [tableName, columnName]
-  );
-
-  if (result.rows[0]?.is_nullable === "NO") {
-    await executeQuery(alterSql);
-  }
-}
-
-async function ensurePostgresSchemaCompatibility() {
-  await ensurePostgresColumnNullable(
-    "data_items",
-    "agent_trajectory",
-    "ALTER TABLE data_items ALTER COLUMN agent_trajectory DROP NOT NULL"
-  );
-}
-
 export async function ensureDbReady() {
   if (!initPromise) {
     initPromise = (async () => {
       const initSql = await loadInitSql();
       await executeSqlScript(initSql);
-      if (dbEngine === "mysql") {
-        await ensureMySqlSchemaCompatibility();
-      } else {
-        await ensurePostgresSchemaCompatibility();
-      }
     })();
   }
   return initPromise;

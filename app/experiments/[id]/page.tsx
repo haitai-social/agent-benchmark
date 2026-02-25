@@ -1,18 +1,23 @@
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
 import { runExperiment } from "@/lib/runner";
+import { requireUser } from "@/lib/supabase-auth";
 import { FlaskIcon } from "@/app/components/icons";
 
 async function runNow(formData: FormData) {
   "use server";
+  const user = await requireUser();
+
   const id = String(formData.get("id") ?? "");
   if (!id) return;
-  await runExperiment(id);
+  await runExperiment(id, user.id);
   revalidatePath(`/experiments/${id}`);
   revalidatePath("/experiments");
 }
 
 export default async function ExperimentDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  await requireUser();
+
   const { id } = await params;
 
   const [exp, runs, latestRunItems] = await Promise.all([

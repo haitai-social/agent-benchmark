@@ -2,10 +2,13 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { requireUser } from "@/lib/supabase-auth";
 import { FilterIcon, JudgeIcon, PlusIcon, RefreshIcon, SearchIcon } from "../components/icons";
 
 async function createEvaluator(formData: FormData) {
   "use server";
+  const user = await requireUser();
+
   const evaluatorKey = String(formData.get("evaluatorKey") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const promptTemplate = String(formData.get("promptTemplate") ?? "").trim();
@@ -16,10 +19,10 @@ async function createEvaluator(formData: FormData) {
   if (!evaluatorKey || !name || !promptTemplate || !baseUrl || !modelName) return;
 
   await dbQuery(
-    `INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, updated_at)
-     SELECT $1, $2, $3, $4, $5, CURRENT_TIMESTAMP
-     WHERE NOT EXISTS (SELECT 1 FROM evaluators WHERE evaluator_key = $6)`,
-    [evaluatorKey, name, promptTemplate, baseUrl, modelName, evaluatorKey]
+    `INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by, updated_at)
+     SELECT $1, $2, $3, $4, $5, $6, $6, CURRENT_TIMESTAMP
+     WHERE NOT EXISTS (SELECT 1 FROM evaluators WHERE evaluator_key = $7)`,
+    [evaluatorKey, name, promptTemplate, baseUrl, modelName, user.id, evaluatorKey]
   );
 
   revalidatePath("/evaluators");
@@ -28,6 +31,8 @@ async function createEvaluator(formData: FormData) {
 
 async function updateEvaluator(formData: FormData) {
   "use server";
+  const user = await requireUser();
+
   const id = String(formData.get("id") ?? "");
   const evaluatorKey = String(formData.get("evaluatorKey") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
@@ -40,9 +45,9 @@ async function updateEvaluator(formData: FormData) {
 
   await dbQuery(
     `UPDATE evaluators
-     SET evaluator_key = $2, name = $3, prompt_template = $4, base_url = $5, model_name = $6, updated_at = CURRENT_TIMESTAMP
+     SET evaluator_key = $2, name = $3, prompt_template = $4, base_url = $5, model_name = $6, updated_by = $7, updated_at = CURRENT_TIMESTAMP
      WHERE id = $1`,
-    [id, evaluatorKey, name, promptTemplate, baseUrl, modelName]
+    [id, evaluatorKey, name, promptTemplate, baseUrl, modelName, user.id]
   );
 
   revalidatePath("/evaluators");
@@ -51,6 +56,8 @@ async function updateEvaluator(formData: FormData) {
 
 async function deleteEvaluator(formData: FormData) {
   "use server";
+  await requireUser();
+
   const id = String(formData.get("id") ?? "");
   const q = String(formData.get("q") ?? "").trim();
   if (!id) return;
@@ -64,6 +71,8 @@ export default async function EvaluatorsPage({
 }: {
   searchParams: Promise<{ q?: string; panel?: string; id?: string }>;
 }) {
+  await requireUser();
+
   const { q = "", panel = "none", id = "" } = await searchParams;
   const filters = { q: q.trim() };
   const creating = panel === "create";
