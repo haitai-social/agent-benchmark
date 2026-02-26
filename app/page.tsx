@@ -11,7 +11,7 @@ export default async function HomePage() {
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM agents WHERE deleted_at IS NULL"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM evaluators WHERE deleted_at IS NULL"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM experiments WHERE deleted_at IS NULL"),
-    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM experiment_runs"),
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM run_cases WHERE is_latest = TRUE"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM traces WHERE deleted_at IS NULL")
   ]);
 

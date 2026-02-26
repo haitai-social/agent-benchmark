@@ -84,12 +84,20 @@ async function updateDataset(formData: FormData) {
   const minItems = String(formData.get("minItems") ?? "all").trim() || "all";
   const updatedIn = String(formData.get("updatedIn") ?? "all").trim() || "all";
   if (!idRaw || !Number.isInteger(id) || id <= 0 || !name) return;
-  await dbQuery(`UPDATE datasets SET name = $2, description = $3, updated_by = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND deleted_at IS NULL`, [
-    id,
-    name,
-    description,
-    user.id
-  ]);
+  await dbQuery(
+    `UPDATE datasets
+     SET name = $2, description = $3, updated_by = $4, updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1
+       AND deleted_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1
+         FROM datasets d2
+         WHERE d2.name = $2
+           AND d2.id <> $1
+           AND d2.deleted_at IS NULL
+       )`,
+    [id, name, description, user.id]
+  );
   revalidatePath("/datasets");
   const params = new URLSearchParams();
   if (q) params.set("q", q);

@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { dbQuery } from "@/lib/db";
+import { dbQuery, engine, withTransaction } from "@/lib/db";
 import { requireUser } from "@/lib/supabase-auth";
 import Link from "next/link";
 import { FilterIcon, FlaskIcon, OpenInNewIcon, PlusIcon, SearchIcon } from "../components/icons";
@@ -17,6 +17,32 @@ function buildListHref(q: string, status: string, datasetLike: string, agentLike
   return params.size > 0 ? `/experiments?${params.toString()}` : "/experiments";
 }
 
+function parseEvaluatorIds(formData: FormData) {
+  return Array.from(
+    new Set(
+      formData
+        .getAll("evaluatorIds")
+        .map((value) => Number(String(value).trim()))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    )
+  );
+}
+
+async function attachExperimentEvaluators(
+  tx: { query: (text: string, params?: unknown[]) => Promise<unknown> },
+  experimentId: number,
+  evaluatorIds: number[]
+) {
+  await tx.query(`DELETE FROM experiment_evaluators WHERE experiment_id = $1`, [experimentId]);
+  for (const evaluatorId of evaluatorIds) {
+    await tx.query(
+      `INSERT INTO experiment_evaluators (experiment_id, evaluator_id, created_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)`,
+      [experimentId, evaluatorId]
+    );
+  }
+}
+
 async function createExperiment(formData: FormData) {
   "use server";
   const user = await requireUser();
@@ -26,25 +52,52 @@ async function createExperiment(formData: FormData) {
   const agentIdRaw = String(formData.get("agentId") ?? "").trim();
   const datasetId = Number(datasetIdRaw);
   const agentId = Number(agentIdRaw);
+  const evaluatorIds = parseEvaluatorIds(formData);
   const q = String(formData.get("q") ?? "").trim();
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const datasetLike = String(formData.get("datasetLike") ?? "").trim();
   const agentLike = String(formData.get("agentLike") ?? "").trim();
 
-  if (!name || !datasetIdRaw || !agentIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(agentId) || agentId <= 0) {
+  if (!name || !datasetIdRaw || !agentIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(agentId) || agentId <= 0 || evaluatorIds.length === 0) {
     return;
   }
 
-  await dbQuery(
-    `INSERT INTO experiments (name, dataset_id, agent_id, status, created_by, updated_by)
-     SELECT $1, $2, $3, 'ready', $4, $4
-     FROM datasets d
-     JOIN agents a ON a.id = $3
-     WHERE d.id = $2
-       AND d.deleted_at IS NULL
-       AND a.deleted_at IS NULL`,
-    [name, datasetId, agentId, user.id]
-  );
+  await withTransaction(async (tx) => {
+    let experimentId = 0;
+    if (engine === "mysql") {
+      const inserted = await tx.query(
+        `INSERT INTO experiments (name, dataset_id, agent_id, status, run_locked, created_by, updated_by)
+         SELECT $1, $2, $3, 'ready', FALSE, $4, $4
+         FROM datasets d
+         JOIN agents a ON a.id = $3
+         WHERE d.id = $2
+           AND d.deleted_at IS NULL
+           AND a.deleted_at IS NULL`,
+        [name, datasetId, agentId, user.id]
+      );
+      experimentId = Number((inserted as { insertId?: number }).insertId ?? 0);
+    } else {
+      const inserted = await tx.query<{ id: number }>(
+        `INSERT INTO experiments (name, dataset_id, agent_id, status, run_locked, created_by, updated_by)
+         SELECT $1, $2, $3, 'ready', FALSE, $4, $4
+         FROM datasets d
+         JOIN agents a ON a.id = $3
+         WHERE d.id = $2
+           AND d.deleted_at IS NULL
+           AND a.deleted_at IS NULL
+         RETURNING id`,
+        [name, datasetId, agentId, user.id]
+      );
+      experimentId = inserted.rows[0]?.id ?? 0;
+    }
+
+    if (!experimentId) {
+      throw new Error("Failed to create experiment");
+    }
+
+    await attachExperimentEvaluators(tx, experimentId, evaluatorIds);
+  });
+
   revalidatePath("/experiments");
   redirect(buildListHref(q, status, datasetLike, agentLike));
 }
@@ -61,26 +114,35 @@ async function updateExperiment(formData: FormData) {
   const agentIdRaw = String(formData.get("agentId") ?? "").trim();
   const agentId = Number(agentIdRaw);
   const expStatus = String(formData.get("expStatus") ?? "ready").trim() || "ready";
+  const evaluatorIds = parseEvaluatorIds(formData);
+  const normalizedStatus = ["ready", "running", "finished", "partial_failed", "failed"].includes(expStatus) ? expStatus : "ready";
 
   const q = String(formData.get("q") ?? "").trim();
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const datasetLike = String(formData.get("datasetLike") ?? "").trim();
   const agentLike = String(formData.get("agentLike") ?? "").trim();
 
-  if (!idRaw || !name || !datasetIdRaw || !agentIdRaw || !Number.isInteger(id) || id <= 0 || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(agentId) || agentId <= 0) {
+  if (!idRaw || !name || !datasetIdRaw || !agentIdRaw || !Number.isInteger(id) || id <= 0 || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(agentId) || agentId <= 0 || evaluatorIds.length === 0) {
     return;
   }
 
-  await dbQuery(
-    `UPDATE experiments
-     SET name = $2, dataset_id = $3, agent_id = $4, status = $5, updated_by = $6, updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1
-       AND deleted_at IS NULL
-       AND EXISTS (SELECT 1 FROM datasets d WHERE d.id = $3 AND d.deleted_at IS NULL)
-       AND EXISTS (SELECT 1 FROM agents a WHERE a.id = $4 AND a.deleted_at IS NULL)`,
-    [id, name, datasetId, agentId, expStatus, user.id]
-  );
+  await withTransaction(async (tx) => {
+    await tx.query(
+      `UPDATE experiments
+       SET name = $2, dataset_id = $3, agent_id = $4, status = $5, updated_by = $6, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1
+         AND deleted_at IS NULL
+         AND run_locked = FALSE
+         AND EXISTS (SELECT 1 FROM datasets d WHERE d.id = $3 AND d.deleted_at IS NULL)
+         AND EXISTS (SELECT 1 FROM agents a WHERE a.id = $4 AND a.deleted_at IS NULL)`,
+      [id, name, datasetId, agentId, normalizedStatus, user.id]
+    );
+
+    await attachExperimentEvaluators(tx, id, evaluatorIds);
+  });
+
   revalidatePath("/experiments");
+  revalidatePath(`/experiments/${id}`);
   redirect(buildListHref(q, status, datasetLike, agentLike));
 }
 
@@ -131,13 +193,19 @@ export default async function ExperimentsPage({
   const filterHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=filter`;
   const hasFilter = filters.status !== "all" || !!filters.datasetLike || !!filters.agentLike;
 
-  const [datasets, agents, experiments, editing] = await Promise.all([
+  const [datasets, agents, evaluators, experiments, editing, editingEvaluators] = await Promise.all([
     dbQuery<{ id: number; name: string }>(`SELECT id, name FROM datasets WHERE deleted_at IS NULL ORDER BY created_at DESC`),
     dbQuery<{ id: number; name: string; agent_key: string; version: string }>(
       `SELECT id, name, agent_key, version
        FROM agents
        WHERE deleted_at IS NULL AND status = 'active'
        ORDER BY updated_at DESC`
+    ),
+    dbQuery<{ id: number; name: string; evaluator_key: string }>(
+      `SELECT id, name, evaluator_key
+       FROM evaluators
+       WHERE deleted_at IS NULL
+       ORDER BY created_at ASC`
     ),
     dbQuery<{
       id: number;
@@ -149,18 +217,22 @@ export default async function ExperimentsPage({
       agent_version: string;
       status: string;
       created_at: string;
+      evaluator_count: number | string;
     }>(
       `SELECT e.id, e.name, d.id AS dataset_id, d.name AS dataset_name,
               a.id AS agent_id, a.agent_key, a.version AS agent_version,
-              e.status, e.created_at
+              e.status, e.created_at,
+              COUNT(ee.id) AS evaluator_count
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
        JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
+       LEFT JOIN experiment_evaluators ee ON ee.experiment_id = e.id
        WHERE ($1 = '' OR LOWER(e.name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(a.version) LIKE CONCAT('%', LOWER($4), '%'))
          AND e.deleted_at IS NULL
          AND ($5 = 'all' OR e.status = $6)
          AND ($7 = '' OR LOWER(d.name) LIKE CONCAT('%', LOWER($8), '%'))
          AND ($9 = '' OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($10), '%'))
+       GROUP BY e.id, e.name, d.id, d.name, a.id, a.agent_key, a.version, e.status, e.created_at
        ORDER BY e.created_at DESC`,
       [
         filters.q,
@@ -176,14 +248,18 @@ export default async function ExperimentsPage({
       ]
     ),
     Number.isInteger(editingId) && editingId > 0
-      ? dbQuery<{ id: number; name: string; dataset_id: number; agent_id: number; status: string }>(
-          `SELECT id, name, dataset_id, agent_id, status FROM experiments WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+      ? dbQuery<{ id: number; name: string; dataset_id: number; agent_id: number; status: string; run_locked: boolean }>(
+          `SELECT id, name, dataset_id, agent_id, status, run_locked FROM experiments WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
           [editingId]
         )
-      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; name: string; dataset_id: number; agent_id: number; status: string }>; rowCount: number })
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; name: string; dataset_id: number; agent_id: number; status: string; run_locked: boolean }>; rowCount: number }),
+    Number.isInteger(editingId) && editingId > 0
+      ? dbQuery<{ evaluator_id: number }>(`SELECT evaluator_id FROM experiment_evaluators WHERE experiment_id = $1`, [editingId])
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ evaluator_id: number }>; rowCount: number })
   ]);
 
   const editingRow = editing.rowCount > 0 ? editing.rows[0] : null;
+  const selectedEvaluatorIds = new Set(editingEvaluators.rows.map((row) => row.evaluator_id));
   const showEditor = creating || Boolean(editingRow);
 
   return (
@@ -191,7 +267,6 @@ export default async function ExperimentsPage({
       <section className="page-hero">
         <div className="breadcrumb">评测 &nbsp;/&nbsp; Experiments</div>
         <h1>Experiments</h1>
-        <p className="muted">绑定评测集与 Agent 版本，发起完整评估运行。</p>
       </section>
 
       <section className="toolbar-row">
@@ -243,6 +318,7 @@ export default async function ExperimentsPage({
               <th>名称</th>
               <th>评测集</th>
               <th>Agent</th>
+              <th>Evaluators</th>
               <th>状态</th>
               <th>创建时间</th>
               <th>操作</th>
@@ -260,6 +336,7 @@ export default async function ExperimentsPage({
                 <td>
                   <code>{`${e.agent_key}@${e.agent_version}`}</code>
                 </td>
+                <td>{Number(e.evaluator_count)}</td>
                 <td>
                   <span className={`status-pill ${e.status}`}>{e.status}</span>
                 </td>
@@ -268,9 +345,6 @@ export default async function ExperimentsPage({
                   <div className="row-actions">
                     <Link href={`${listHref}${listHref.includes("?") ? "&" : "?"}id=${e.id}`} className="text-btn">
                       详情
-                    </Link>
-                    <Link href={`/experiments/${e.id}`} className="text-btn">
-                      运行
                     </Link>
                     <form action={deleteExperiment}>
                       <input type="hidden" name="id" value={e.id} />
@@ -310,7 +384,8 @@ export default async function ExperimentsPage({
                     { value: "all", label: "全部" },
                     { value: "ready", label: "ready" },
                     { value: "running", label: "running" },
-                    { value: "completed", label: "completed" },
+                    { value: "finished", label: "finished" },
+                    { value: "partial_failed", label: "partial_failed" },
                     { value: "failed", label: "failed" }
                   ].map((item) => (
                     <label key={item.value} className="chip">
@@ -383,9 +458,22 @@ export default async function ExperimentsPage({
                 ))}
               </select>
             </FormField>
+            <FormField title="选择 Evaluators" typeLabel="M:N" required>
+              <div className="chip-row">
+                {evaluators.rows.map((ev) => {
+                  const checked = editingRow ? selectedEvaluatorIds.has(ev.id) : false;
+                  return (
+                    <label key={ev.id} className="chip">
+                      <input type="checkbox" name="evaluatorIds" value={ev.id} defaultChecked={checked} />
+                      {ev.name}
+                    </label>
+                  );
+                })}
+              </div>
+            </FormField>
             <FormField title="状态" typeLabel="Enum">
-              <select name="expStatus" defaultValue={editingRow?.status ?? "ready"}>
-                {["ready", "running", "completed", "failed"].map((s) => (
+              <select name="expStatus" defaultValue={editingRow?.status ?? "ready"} disabled={Boolean(editingRow?.run_locked)}>
+                {["ready", "running", "finished", "partial_failed", "failed"].map((s) => (
                   <option key={s} value={s}>
                     {s}
                   </option>

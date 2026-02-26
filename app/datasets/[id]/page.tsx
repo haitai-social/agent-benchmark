@@ -226,6 +226,7 @@ export default async function DatasetDetailPage({
   const baseHref = qv ? `/datasets/${id}?q=${encodeURIComponent(qv)}` : `/datasets/${id}`;
   const editingItem = editId ? items.rows.find((item) => item.id === editId) : undefined;
   const showingEditor = adding || Boolean(editingItem);
+  const itemEditorFormId = editingItem ? `item-editor-${editingItem.id}` : "item-editor-create";
 
   return (
     <>
@@ -341,7 +342,7 @@ export default async function DatasetDetailPage({
 
       {showingEditor ? (
         <EntityDrawer closeHref={baseHref} title={editingItem ? "数据详情" : "添加数据"} drawerClassName="wide">
-          <form action={editingItem ? updateItem : createItem} className="drawer-form form-tone-green">
+          <form id={itemEditorFormId} action={editingItem ? updateItem : createItem} className="drawer-form form-tone-green">
             <input type="hidden" name="datasetId" value={id} />
             <input type="hidden" name="q" value={qv} />
             {editingItem ? <input type="hidden" name="itemId" value={editingItem.id} /> : null}
@@ -394,25 +395,28 @@ export default async function DatasetDetailPage({
                   : ""
               }
             />
-
-            <div className="drawer-actions">
-              <SubmitButton className="primary-btn" pendingText={editingItem ? "更新中..." : "添加中..."}>
-                {editingItem ? "更新" : "添加"}
-              </SubmitButton>
-              {editingItem ? (
-                <form action={deleteItem} className="drawer-inline-form">
-                  <input type="hidden" name="id" value={editingItem.id} />
-                  <input type="hidden" name="datasetId" value={id} />
-                  <SubmitButton className="danger-btn" pendingText="删除中...">
-                    删除
-                  </SubmitButton>
-                </form>
-              ) : null}
-              <Link href={baseHref} className="ghost-btn">
-                取消
-              </Link>
-            </div>
           </form>
+          <div className="drawer-actions">
+            <SubmitButton
+              form={itemEditorFormId}
+              className="primary-btn"
+              pendingText={editingItem ? "更新中..." : "添加中..."}
+            >
+              {editingItem ? "更新" : "添加"}
+            </SubmitButton>
+            {editingItem ? (
+              <form action={deleteItem} className="drawer-inline-form">
+                <input type="hidden" name="id" value={editingItem.id} />
+                <input type="hidden" name="datasetId" value={id} />
+                <SubmitButton className="danger-btn" pendingText="删除中...">
+                  删除
+                </SubmitButton>
+              </form>
+            ) : null}
+            <Link href={baseHref} className="ghost-btn">
+              取消
+            </Link>
+          </div>
         </EntityDrawer>
       ) : null}
     </>

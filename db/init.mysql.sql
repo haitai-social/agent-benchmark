@@ -91,7 +91,10 @@ CREATE TABLE IF NOT EXISTS experiments (
   name VARCHAR(255) NOT NULL,
   dataset_id BIGINT UNSIGNED NOT NULL,
   agent_id BIGINT UNSIGNED NOT NULL,
-  status VARCHAR(100) NOT NULL DEFAULT 'draft',
+  status VARCHAR(100) NOT NULL DEFAULT 'ready',
+  run_locked TINYINT(1) NOT NULL DEFAULT 0,
+  started_at TIMESTAMP NULL DEFAULT NULL,
+  finished_at TIMESTAMP NULL DEFAULT NULL,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
   is_deleted TINYINT(1) NOT NULL DEFAULT 0,
@@ -105,34 +108,66 @@ CREATE TABLE IF NOT EXISTS experiments (
   INDEX idx_experiments_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS experiment_runs (
+CREATE TABLE IF NOT EXISTS experiment_evaluators (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   experiment_id BIGINT UNSIGNED NOT NULL,
-  status VARCHAR(100) NOT NULL DEFAULT 'running',
-  triggered_by VARCHAR(255) NOT NULL,
-  started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  finished_at DATETIME,
-  summary JSON NOT NULL DEFAULT (JSON_OBJECT()),
-  CONSTRAINT fk_experiment_runs_experiment
-    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+  evaluator_id BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_experiment_evaluators_experiment
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+  CONSTRAINT fk_experiment_evaluators_evaluator
+    FOREIGN KEY (evaluator_id) REFERENCES evaluators(id) ON DELETE RESTRICT,
+  CONSTRAINT uq_experiment_evaluator UNIQUE (experiment_id, evaluator_id),
+  INDEX idx_experiment_evaluators_experiment (experiment_id),
+  INDEX idx_experiment_evaluators_evaluator (evaluator_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS run_item_results (
+CREATE TABLE IF NOT EXISTS run_cases (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  run_id BIGINT UNSIGNED NOT NULL,
+  experiment_id BIGINT UNSIGNED NOT NULL,
   data_item_id BIGINT UNSIGNED NOT NULL,
-  environment_build_status VARCHAR(255) NOT NULL,
-  input_delivery_status VARCHAR(255) NOT NULL,
-  agent_trajectory JSON NOT NULL,
-  agent_output JSON NOT NULL,
-  judge_scores JSON NOT NULL,
-  final_score DOUBLE NOT NULL,
-  logs TEXT NOT NULL,
+  agent_id BIGINT UNSIGNED NOT NULL,
+  attempt_no INT NOT NULL,
+  is_latest TINYINT(1) NOT NULL DEFAULT 1,
+  status VARCHAR(100) NOT NULL DEFAULT 'pending',
+  agent_trajectory JSON DEFAULT NULL,
+  agent_output JSON DEFAULT NULL,
+  final_score DOUBLE DEFAULT NULL,
+  latency_ms BIGINT DEFAULT NULL,
+  input_tokens BIGINT DEFAULT NULL,
+  output_tokens BIGINT DEFAULT NULL,
+  error_message TEXT DEFAULT NULL,
+  logs LONGTEXT DEFAULT NULL,
+  started_at TIMESTAMP NULL DEFAULT NULL,
+  finished_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_run_item_results_run
-    FOREIGN KEY (run_id) REFERENCES experiment_runs(id) ON DELETE CASCADE,
-  CONSTRAINT fk_run_item_results_data_item
-    FOREIGN KEY (data_item_id) REFERENCES data_items(id) ON DELETE CASCADE
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_run_cases_experiment
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+  CONSTRAINT fk_run_cases_data_item
+    FOREIGN KEY (data_item_id) REFERENCES data_items(id) ON DELETE CASCADE,
+  CONSTRAINT fk_run_cases_agent
+    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE RESTRICT,
+  CONSTRAINT uq_run_case_attempt UNIQUE (experiment_id, data_item_id, attempt_no),
+  INDEX idx_run_cases_experiment_latest_status (experiment_id, is_latest, status),
+  INDEX idx_run_cases_experiment_created (experiment_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS evaluate_results (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  run_case_id BIGINT UNSIGNED NOT NULL,
+  evaluator_id BIGINT UNSIGNED NOT NULL,
+  score DOUBLE NOT NULL,
+  reason TEXT NOT NULL,
+  raw_result JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_evaluate_results_run_case
+    FOREIGN KEY (run_case_id) REFERENCES run_cases(id) ON DELETE CASCADE,
+  CONSTRAINT fk_evaluate_results_evaluator
+    FOREIGN KEY (evaluator_id) REFERENCES evaluators(id) ON DELETE RESTRICT,
+  CONSTRAINT uq_evaluate_result UNIQUE (run_case_id, evaluator_id),
+  INDEX idx_evaluate_results_run_case (run_case_id),
+  INDEX idx_evaluate_results_evaluator (evaluator_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Seed evaluators

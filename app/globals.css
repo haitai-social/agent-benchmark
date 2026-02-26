@@ -886,10 +886,29 @@ a {
   color: #15803d;
 }
 
+.status-pill.finished,
+.status-pill.success {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.status-pill.partial_failed {
+  border-color: #fcd34d;
+  background: #fffbeb;
+  color: #b45309;
+}
+
 .status-pill.failed {
   border-color: #fecaca;
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.status-pill.pending {
+  border-color: #ddd6fe;
+  background: #f5f3ff;
+  color: #6d28d9;
 }
 
 .detail-head {
@@ -902,6 +921,155 @@ a {
 .detail-head.refined {
   display: grid;
   gap: 10px;
+}
+
+.exp-header-strip {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.exp-header-main {
+  display: grid;
+  gap: 10px;
+}
+
+.exp-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.exp-title-row h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.exp-kpi-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.exp-kpi-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #d9dee8;
+  background: #f8fafc;
+  color: #334155;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.exp-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.exp-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.exp-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #d9dde5;
+  border-radius: 10px;
+  background: #fff;
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 700;
+  transition: all 160ms ease;
+}
+
+.exp-tab:hover {
+  border-color: #c1cad9;
+  background: #f8fafc;
+}
+
+.exp-tab.active {
+  background: #111827;
+  color: #fff;
+  border-color: #111827;
+}
+
+.exp-table-cell-truncate {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.exp-metric-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.exp-mini-bar-track {
+  width: 100%;
+  min-width: 100px;
+  height: 8px;
+  border-radius: 999px;
+  background: #eef2f7;
+  overflow: hidden;
+}
+
+.exp-mini-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #10b981, #0ea5e9);
+}
+
+.attempt-timeline {
+  display: grid;
+  gap: 8px;
+}
+
+.attempt-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 10px;
+}
+
+.card pre {
+  margin: 6px 0 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f8fafc;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 980px) {
+  .exp-header-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .exp-header-actions {
+    justify-content: flex-start;
+  }
 }
 
 .detail-main-title {
@@ -2027,4 +2195,51 @@ code {
   font-size: 12.5px;
   font-weight: 600;
   box-shadow: 0 6px 20px rgba(124, 74, 3, 0.08);
+}
+
+.dev-toast-overlay {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 150;
+  pointer-events: none;
+}
+
+.dev-toast-card {
+  min-width: 220px;
+  max-width: min(86vw, 420px);
+  border-radius: 999px;
+  border: 1px solid #cde8da;
+  background: linear-gradient(180deg, #ffffff 0%, #f4fbf7 100%);
+  color: #14532d;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
+  animation: dev-toast-in 180ms var(--ease-smooth) both;
+}
+
+.dev-toast-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #10b981;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.18);
+}
+
+@keyframes dev-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }

@@ -99,29 +99,37 @@ async function openAiJudge(evaluator: Evaluator, input: JudgeInput): Promise<Jud
   }
 }
 
-export async function listEnabledEvaluators() {
+export async function listEvaluatorsForExperiment(experimentId: number) {
   const { rows } = await dbQuery<Evaluator>(
-    `SELECT id, evaluator_key, name, prompt_template, base_url, model_name
-     FROM evaluators
-     WHERE deleted_at IS NULL
-     ORDER BY created_at ASC`
+    `SELECT ev.id, ev.evaluator_key, ev.name, ev.prompt_template, ev.base_url, ev.model_name
+     FROM experiment_evaluators ee
+     JOIN evaluators ev ON ev.id = ee.evaluator_id
+     JOIN experiments e ON e.id = ee.experiment_id
+     WHERE ee.experiment_id = $1
+       AND e.deleted_at IS NULL
+       AND ev.deleted_at IS NULL
+     ORDER BY ev.created_at ASC`,
+    [experimentId]
   );
   return rows;
 }
 
-export async function scoreByEvaluators(input: JudgeInput) {
-  const evaluators = await listEnabledEvaluators();
-  const results: Array<{ key: string; name: string; score: number; reason: string }> = [];
+export async function scoreByEvaluatorList(
+  evaluators: Evaluator[],
+  input: JudgeInput
+): Promise<{ results: Array<{ evaluatorId: number; key: string; name: string; score: number; reason: string; raw: Record<string, unknown> }>; finalScore: number }> {
+  const results: Array<{ evaluatorId: number; key: string; name: string; score: number; reason: string; raw: Record<string, unknown> }> = [];
 
   for (const evaluator of evaluators) {
     const llmResult = await openAiJudge(evaluator, input);
     const result = llmResult ?? heuristicScore(evaluator.evaluator_key, input);
-
     results.push({
+      evaluatorId: evaluator.id,
       key: evaluator.evaluator_key,
       name: evaluator.name,
       score: result.score,
-      reason: result.reason
+      reason: result.reason,
+      raw: { source: llmResult ? "llm" : "heuristic" }
     });
   }
 
