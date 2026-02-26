@@ -31,12 +31,18 @@ export default async function ExperimentDetailPage({ params }: { params: Promise
       id: number;
       name: string;
       dataset_name: string;
+      agent_key: string;
       agent_version: string;
+      docker_image: string;
       status: string;
       created_at: string;
     }>(
-      `SELECT e.id, e.name, d.name AS dataset_name, e.agent_version, e.status, e.created_at
-       FROM experiments e JOIN datasets d ON d.id = e.dataset_id
+      `SELECT e.id, e.name, d.name AS dataset_name,
+              a.agent_key, a.version AS agent_version, a.docker_image,
+              e.status, e.created_at
+       FROM experiments e
+       JOIN datasets d ON d.id = e.dataset_id
+       JOIN agents a ON a.id = e.agent_id
        WHERE e.id = $1`,
       [id]
     ),
@@ -78,7 +84,10 @@ export default async function ExperimentDetailPage({ params }: { params: Promise
         </h2>
         <p className="muted">评测集: {e.dataset_name}</p>
         <p className="muted">
-          Agent版本: <code>{e.agent_version}</code> | 状态: {e.status}
+          Agent: <code>{`${e.agent_key}@${e.agent_version}`}</code>
+        </p>
+        <p className="muted">
+          Image: <code>{e.docker_image}</code> | 状态: {e.status}
         </p>
         <form action={runNow}>
           <input type="hidden" name="id" value={id} />

@@ -7,22 +7,22 @@ type RunSummary = {
   successCount: number;
 };
 
-function isEnvBuildable(snapshot: unknown) {
-  if (snapshot && typeof snapshot === "object") return true;
-  if (typeof snapshot === "string") return snapshot.trim().length > 0;
-  return false;
-}
-
 export async function runExperiment(experimentId: number, triggeredBy: string) {
   try {
     return await withTransaction(async (tx) => {
       const exp = await tx.query<{
-      id: number;
-      dataset_id: number;
-      agent_version: string;
-      name: string;
+        id: number;
+        dataset_id: number;
+        name: string;
+        agent_id: number;
+        agent_key: string;
+        agent_version: string;
+        docker_image: string;
       }>(
-        `SELECT id, dataset_id, agent_version, name FROM experiments WHERE id = $1`,
+        `SELECT e.id, e.dataset_id, e.name, e.agent_id, a.agent_key, a.version AS agent_version, a.docker_image
+         FROM experiments e
+         JOIN agents a ON a.id = e.agent_id
+         WHERE e.id = $1`,
         [experimentId]
       );
 
@@ -52,12 +52,12 @@ export async function runExperiment(experimentId: number, triggeredBy: string) {
 
       const items = await tx.query<{
         id: number;
-        environment_snapshot: unknown;
+        session_jsonl: string;
         user_input: string;
-        agent_trajectory: unknown;
-        agent_output: unknown;
+        reference_trajectory: unknown;
+        reference_output: unknown;
       }>(
-        `SELECT id, environment_snapshot, user_input, agent_trajectory, agent_output
+        `SELECT id, session_jsonl, user_input, reference_trajectory, reference_output
          FROM data_items WHERE dataset_id = $1 ORDER BY created_at ASC`,
         [exp.rows[0].dataset_id]
       );
@@ -66,12 +66,14 @@ export async function runExperiment(experimentId: number, triggeredBy: string) {
       let successCount = 0;
 
       for (const item of items.rows) {
-        const environmentBuildStatus = isEnvBuildable(item.environment_snapshot) ? "success" : "failed";
+        const environmentBuildStatus = "success";
         const inputDeliveryStatus = item.user_input.trim() ? "success" : "failed";
+        const replayTrajectory = item.reference_trajectory ?? [];
+        const replayOutput = item.reference_output ?? {};
 
         const judge = await scoreByEvaluators({
-          trajectory: item.agent_trajectory,
-          agentOutput: item.agent_output,
+          trajectory: replayTrajectory,
+          agentOutput: replayOutput,
           tools: [],
           userInput: item.user_input
         });
@@ -91,11 +93,11 @@ export async function runExperiment(experimentId: number, triggeredBy: string) {
             item.id,
             environmentBuildStatus,
             inputDeliveryStatus,
-            JSON.stringify(item.agent_trajectory),
-            JSON.stringify(item.agent_output),
+            JSON.stringify(replayTrajectory),
+            JSON.stringify(replayOutput),
             JSON.stringify(judge.results),
             judge.finalScore,
-            `agent_version=${exp.rows[0].agent_version}; mode=replay`
+            `agent=${exp.rows[0].agent_key}@${exp.rows[0].agent_version}; image=${exp.rows[0].docker_image}; mode=replay`
           ]
         );
       }

@@ -62,6 +62,18 @@ export function FlaskIcon(props: IconProps) {
   );
 }
 
+export function AgentIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <rect x="6" y="7" width="12" height="10" rx="2" />
+      <path d="M12 3v3" />
+      <circle cx="9.5" cy="12" r="1" />
+      <circle cx="14.5" cy="12" r="1" />
+      <path d="M10 15h4" />
+    </BaseIcon>
+  );
+}
+
 export function DotIcon(props: IconProps) {
   return (
     <BaseIcon {...props}>

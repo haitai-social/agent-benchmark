@@ -299,7 +299,6 @@ export default async function TracesPage({
               </Link>
             </div>
             <div className="action-drawer-body">
-              <p className="muted">可在此更新 trace 元数据与原始载荷。</p>
               <form action={updateTrace} className="menu-form">
                 <input type="hidden" name="id" value={editing.id} />
                 <input type="hidden" name="q" value={qv} />
@@ -350,10 +349,6 @@ export default async function TracesPage({
               </Link>
             </div>
             <div className="action-drawer-body">
-              <p className="muted">
-                Endpoint: <code>POST /api/otel/v1/traces</code>
-              </p>
-              <p className="muted">支持 OTLP JSON(resourceSpans) 与简化 spans JSON。</p>
               {result === "ok" ? (
                 <p className="muted" style={{ color: "#0f766e" }}>
                   写入成功，新增 {inserted || "0"} 条 spans。
