@@ -20,11 +20,12 @@ export async function getCurrentUser() {
   const cookieStore = await cookies();
   const { access, profile } = getAuthCookieNames();
   const accessToken = cookieStore.get(access)?.value ?? "";
-  if (!accessToken) return null;
 
   const profileCookie = cookieStore.get(profile)?.value ?? "";
-  const parsed = await parseSignedProfileCookie({ rawCookie: profileCookie, accessToken });
+  const parsed = await parseSignedProfileCookie({ rawCookie: profileCookie });
   if (parsed) return parsed.user;
+
+  if (!accessToken) return null;
 
   const fallback = await fetchSupabaseUserRemote(accessToken);
   return fallback.ok ? fallback.user : null;
