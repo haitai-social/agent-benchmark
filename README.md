@@ -7,21 +7,19 @@
 ## 本地运行
 
 ```bash
+cd platform
 npm install
 npm run dev
 ```
 
-默认会启动 `platform` 工作区。
-
-常用命令：
+常用命令（均在 `platform/` 目录执行）：
 - `npm run dev`
 - `npm run build`
 - `npm run typecheck`
-- `npm run dev:platform`
 
 ## Vercel 部署说明
 
-此仓库保留 root 脚本作为统一入口，Vercel 可直接以仓库根目录构建。
+本次结构调整后，请将 Vercel Project 的 **Root Directory** 设置为 `platform`。
 
 ## 平台能力（platform）
 
@@ -34,7 +32,7 @@ npm run dev
 
 ## 环境变量
 
-平台服务读取 `.env`（或运行环境变量）：
+平台服务读取 `platform/.env`（或运行环境变量）：
 
 - `POSTGRES_SERVER`
 - `POSTGRES_USER`
