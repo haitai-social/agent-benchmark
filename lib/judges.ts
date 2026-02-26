@@ -102,7 +102,9 @@ async function openAiJudge(evaluator: Evaluator, input: JudgeInput): Promise<Jud
 export async function listEnabledEvaluators() {
   const { rows } = await dbQuery<Evaluator>(
     `SELECT id, evaluator_key, name, prompt_template, base_url, model_name
-     FROM evaluators ORDER BY created_at ASC`
+     FROM evaluators
+     WHERE deleted_at IS NULL
+     ORDER BY created_at ASC`
   );
   return rows;
 }

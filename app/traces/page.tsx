@@ -13,6 +13,7 @@ import {
   TraceIcon
 } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
+import { TextareaWithFileUpload } from "../components/textarea-with-file-upload";
 
 function buildListHref(q: string, service: string, extras?: Record<string, string>) {
   const params = new URLSearchParams();
@@ -92,7 +93,7 @@ async function updateTrace(formData: FormData) {
          end_time = $9,
          attributes = $10,
          raw = $11
-     WHERE id = $1`,
+     WHERE id = $1 AND deleted_at IS NULL`,
     [
       id,
       traceId,
@@ -122,7 +123,13 @@ async function deleteTrace(formData: FormData) {
   const service = String(formData.get("service") ?? "all").trim() || "all";
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
 
-  await dbQuery(`DELETE FROM traces WHERE id = $1`, [id]);
+  await dbQuery(
+    `UPDATE traces
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [id]
+  );
 
   revalidatePath("/traces");
   redirect(buildListHref(q, service));
@@ -156,12 +163,17 @@ export default async function TracesPage({
       `SELECT id, trace_id, span_id, name, service_name, status, created_at
        FROM traces
        WHERE ($1 = '' OR LOWER(COALESCE(trace_id, '')) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(name) LIKE CONCAT('%', LOWER($3), '%'))
+         AND deleted_at IS NULL
          AND ($4 = 'all' OR COALESCE(service_name, '-') = $5)
        ORDER BY id DESC LIMIT 100`,
       [qv, qv, qv, service, service]
     ),
     dbQuery<{ service_name: string }>(
-      `SELECT COALESCE(service_name, '-') AS service_name FROM traces GROUP BY COALESCE(service_name, '-') ORDER BY service_name ASC`
+      `SELECT COALESCE(service_name, '-') AS service_name
+       FROM traces
+       WHERE deleted_at IS NULL
+       GROUP BY COALESCE(service_name, '-')
+       ORDER BY service_name ASC`
     ),
     Number.isInteger(detailId) && detailId > 0
       ? dbQuery<{
@@ -180,7 +192,7 @@ export default async function TracesPage({
         }>(
           `SELECT id, trace_id, span_id, parent_span_id, name, service_name, status, start_time, end_time, attributes, raw, created_at
            FROM traces
-           WHERE id = $1 LIMIT 1`,
+           WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
           [detailId]
         )
       : Promise.resolve({ rows: [], rowCount: 0, affectedRows: 0, insertId: 0 })
@@ -299,40 +311,105 @@ export default async function TracesPage({
               </Link>
             </div>
             <div className="action-drawer-body">
-              <form action={updateTrace} className="menu-form">
+              <form id={`trace-form-${editing.id}`} action={updateTrace} className="menu-form form-tone-green">
                 <input type="hidden" name="id" value={editing.id} />
                 <input type="hidden" name="q" value={qv} />
                 <input type="hidden" name="service" value={service} />
-                <label className="field-label">Span Name</label>
-                <input name="name" required defaultValue={editing.name} placeholder="Span Name" />
-                <label className="field-label">Trace ID</label>
-                <input name="traceId" defaultValue={editing.trace_id ?? ""} placeholder="Trace ID" />
-                <label className="field-label">Span ID</label>
-                <input name="spanId" defaultValue={editing.span_id ?? ""} placeholder="Span ID" />
-                <label className="field-label">Parent Span ID</label>
-                <input name="parentSpanId" defaultValue={editing.parent_span_id ?? ""} placeholder="Parent Span ID" />
-                <label className="field-label">Service Name</label>
-                <input name="serviceName" defaultValue={editing.service_name ?? ""} placeholder="Service Name" />
-                <label className="field-label">Status</label>
-                <input name="status" defaultValue={editing.status ?? ""} placeholder="Status" />
-                <label className="field-label">Start Time</label>
-                <input type="datetime-local" name="startTime" defaultValue={toDatetimeLocal(editing.start_time)} />
-                <label className="field-label">End Time</label>
-                <input type="datetime-local" name="endTime" defaultValue={toDatetimeLocal(editing.end_time)} />
-                <label className="field-label">Attributes JSON</label>
-                <textarea name="attributes" defaultValue={JSON.stringify(editing.attributes, null, 2)} />
-                <label className="field-label">Raw JSON</label>
-                <textarea name="raw" defaultValue={JSON.stringify(editing.raw, null, 2)} />
-                <SubmitButton pendingText="更新中...">更新</SubmitButton>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Span Name</span>
+                    <span className="type-pill">String</span>
+                  </label>
+                  <input name="name" required defaultValue={editing.name} placeholder="Span Name" />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Trace ID</span>
+                    <span className="type-pill">Optional</span>
+                  </label>
+                  <input name="traceId" defaultValue={editing.trace_id ?? ""} placeholder="Trace ID" />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Span ID</span>
+                    <span className="type-pill">Optional</span>
+                  </label>
+                  <input name="spanId" defaultValue={editing.span_id ?? ""} placeholder="Span ID" />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Parent Span ID</span>
+                    <span className="type-pill">Optional</span>
+                  </label>
+                  <input name="parentSpanId" defaultValue={editing.parent_span_id ?? ""} placeholder="Parent Span ID" />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Service Name</span>
+                    <span className="type-pill">Optional</span>
+                  </label>
+                  <input name="serviceName" defaultValue={editing.service_name ?? ""} placeholder="Service Name" />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Status</span>
+                    <span className="type-pill">Optional</span>
+                  </label>
+                  <input name="status" defaultValue={editing.status ?? ""} placeholder="Status" />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Start Time</span>
+                    <span className="type-pill">Datetime</span>
+                  </label>
+                  <input type="datetime-local" name="startTime" defaultValue={toDatetimeLocal(editing.start_time)} />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">End Time</span>
+                    <span className="type-pill">Datetime</span>
+                  </label>
+                  <input type="datetime-local" name="endTime" defaultValue={toDatetimeLocal(editing.end_time)} />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Attributes JSON</span>
+                    <span className="type-pill">JSON</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="attributes"
+                    defaultValue={JSON.stringify(editing.attributes, null, 2)}
+                    accept=".json,.txt"
+                  />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Raw JSON</span>
+                    <span className="type-pill">JSON</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="raw"
+                    defaultValue={JSON.stringify(editing.raw, null, 2)}
+                    accept=".json,.txt"
+                  />
+                </div>
               </form>
-              <form action={deleteTrace} className="menu-form">
-                <input type="hidden" name="id" value={editing.id} />
-                <input type="hidden" name="q" value={qv} />
-                <input type="hidden" name="service" value={service} />
-                <SubmitButton className="text-btn danger" pendingText="删除中...">
-                  删除
+              <div className="drawer-actions">
+                <SubmitButton form={`trace-form-${editing.id}`} className="primary-btn" pendingText="更新中...">
+                  更新
                 </SubmitButton>
-              </form>
+                <form action={deleteTrace} className="drawer-inline-form">
+                  <input type="hidden" name="id" value={editing.id} />
+                  <input type="hidden" name="q" value={qv} />
+                  <input type="hidden" name="service" value={service} />
+                  <SubmitButton className="danger-btn" pendingText="删除中...">
+                    删除
+                  </SubmitButton>
+                </form>
+                <Link href={listHref || "/traces"} className="ghost-btn">
+                  取消
+                </Link>
+              </div>
             </div>
           </aside>
         </div>
@@ -359,31 +436,39 @@ export default async function TracesPage({
                   写入失败：{message || "invalid payload"}
                 </p>
               ) : null}
-              <form action={ingestManualTrace} className="menu-form">
+              <form action={ingestManualTrace} className="menu-form form-tone-green">
                 <input type="hidden" name="q" value={qv} />
                 <input type="hidden" name="service" value={service} />
-                <textarea
-                  name="payload"
-                  defaultValue={JSON.stringify(
-                    {
-                      spans: [
-                        {
-                          traceId: "demo-trace",
-                          spanId: "demo-span",
-                          name: "benchmark.run",
-                          serviceName: "benchmark-platform",
-                          attributes: { env: "test" },
-                          status: "OK",
-                          startTime: new Date().toISOString(),
-                          endTime: new Date().toISOString()
-                        }
-                      ]
-                    },
-                    null,
-                    2
-                  )}
-                />
-                <SubmitButton pendingText="写入中...">写入 Trace</SubmitButton>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Payload JSON</span>
+                    <span className="type-pill">JSON</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="payload"
+                    required
+                    accept=".json,.txt"
+                    defaultValue={JSON.stringify(
+                      {
+                        spans: [
+                          {
+                            traceId: "demo-trace",
+                            spanId: "demo-span",
+                            name: "benchmark.run",
+                            serviceName: "benchmark-platform",
+                            attributes: { env: "test" },
+                            status: "OK",
+                            startTime: new Date().toISOString(),
+                            endTime: new Date().toISOString()
+                          }
+                        ]
+                      },
+                      null,
+                      2
+                    )}
+                  />
+                </div>
+                <SubmitButton className="primary-btn" pendingText="写入中...">写入 Trace</SubmitButton>
               </form>
             </div>
           </aside>

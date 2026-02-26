@@ -6,6 +6,7 @@ import { parseJsonOrWrap } from "@/lib/safe-json";
 import { requireUser } from "@/lib/supabase-auth";
 import { AgentIcon, FilterIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
+import { TextareaWithFileUpload } from "../components/textarea-with-file-upload";
 
 const defaultOpenApiSpec = {
   openapi: "3.1.0",
@@ -80,7 +81,7 @@ async function createAgent(formData: FormData) {
   await dbQuery(
     `INSERT INTO agents (agent_key, version, name, description, docker_image, openapi_spec, status, metadata, created_by, updated_by, updated_at)
      SELECT $1, $2, $3, $4, $5, $6, 'active', $7, $8, $8, CURRENT_TIMESTAMP
-     WHERE NOT EXISTS (SELECT 1 FROM agents WHERE agent_key = $9 AND version = $10)`,
+     WHERE NOT EXISTS (SELECT 1 FROM agents WHERE agent_key = $9 AND version = $10 AND deleted_at IS NULL)`,
     [
       agentKey,
       version,
@@ -131,7 +132,7 @@ async function updateAgent(formData: FormData) {
          status = $9,
          updated_by = $10,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1`,
+     WHERE id = $1 AND deleted_at IS NULL`,
     [
       id,
       agentKey,
@@ -152,7 +153,7 @@ async function updateAgent(formData: FormData) {
 
 async function deleteAgent(formData: FormData) {
   "use server";
-  await requireUser();
+  const user = await requireUser();
 
   const idRaw = String(formData.get("id") ?? "").trim();
   const id = Number(idRaw);
@@ -161,8 +162,29 @@ async function deleteAgent(formData: FormData) {
   const keyLike = String(formData.get("keyLike") ?? "").trim();
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
 
-  await dbQuery(`DELETE FROM agents WHERE id = $1`, [id]);
+  await dbQuery(
+    `UPDATE agents
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP,
+         updated_by = $2,
+         updated_at = CURRENT_TIMESTAMP,
+         status = 'archived',
+         version = CONCAT(version, '__deleted__', id)
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [id, user.id]
+  );
+  await dbQuery(
+    `UPDATE experiments
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP,
+         updated_by = $2,
+         updated_at = CURRENT_TIMESTAMP,
+         status = 'archived'
+     WHERE agent_id = $1 AND deleted_at IS NULL`,
+    [id, user.id]
+  );
   revalidatePath("/agents");
+  revalidatePath("/experiments");
   redirect(buildListHref(q, status, keyLike));
 }
 
@@ -195,6 +217,7 @@ export default async function AgentsPage({
     `SELECT id, agent_key, version, name, description, docker_image, openapi_spec, status, metadata, updated_at
      FROM agents
      WHERE ($1 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(version) LIKE CONCAT('%', LOWER($4), '%'))
+       AND deleted_at IS NULL
        AND ($5 = '' OR LOWER(agent_key) LIKE CONCAT('%', LOWER($6), '%'))
        AND ($7 = 'all' OR status = $8)
      ORDER BY updated_at DESC`,
@@ -362,67 +385,125 @@ export default async function AgentsPage({
               </Link>
             </div>
             <div className="action-drawer-body">
-              <form action={editing ? updateAgent : createAgent} className="menu-form">
+              <form
+                id={editing ? `agent-form-${editing.id}` : "agent-form-create"}
+                action={editing ? updateAgent : createAgent}
+                className="menu-form form-tone-green"
+              >
                 {editing ? <input type="hidden" name="id" value={editing.id} /> : null}
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="statusFilter" value={filters.status} />
                 <input type="hidden" name="keyLike" value={filters.keyLike} />
 
-                <label className="field-label">名称</label>
-                <input name="name" placeholder="Agent 名称" required defaultValue={editing?.name ?? ""} />
-
-                <label className="field-label">Agent Key</label>
-                <input name="agentKey" placeholder="例如 openclaw" required defaultValue={editing?.agent_key ?? ""} />
-
-                <label className="field-label">Version</label>
-                <input name="version" placeholder="例如 v2026.02.26" required defaultValue={editing?.version ?? ""} />
-
-                <label className="field-label">Docker Image</label>
-                <input name="dockerImage" placeholder="例如 ghcr.io/org/openclaw:v2026.02.26" required defaultValue={editing?.docker_image ?? ""} />
-
-                <label className="field-label">Status</label>
-                <div className="chip-row">
-                  {["active", "archived"].map((item) => (
-                    <label key={item} className="chip">
-                      <input type="radio" name="status" value={item} defaultChecked={(editing?.status ?? "active") === item} />
-                      {item}
-                    </label>
-                  ))}
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">名称</span>
+                    <span className="type-pill">String</span>
+                  </label>
+                  <input name="name" placeholder="Agent 名称" required defaultValue={editing?.name ?? ""} />
                 </div>
 
-                <label className="field-label">Description</label>
-                <textarea name="description" placeholder="描述" defaultValue={editing?.description ?? ""} />
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Agent Key</span>
+                    <span className="type-pill">Unique</span>
+                  </label>
+                  <input name="agentKey" placeholder="例如 openclaw" required defaultValue={editing?.agent_key ?? ""} />
+                </div>
 
-                <label className="field-label">OpenAPI Spec (JSON)</label>
-                <textarea
-                  name="openapiSpec"
-                  required
-                  defaultValue={
-                    editing?.openapi_spec
-                      ? JSON.stringify(editing.openapi_spec, null, 2)
-                      : JSON.stringify(defaultOpenApiSpec, null, 2)
-                  }
-                />
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Version</span>
+                    <span className="type-pill">SemVer</span>
+                  </label>
+                  <input name="version" placeholder="例如 v2026.02.26" required defaultValue={editing?.version ?? ""} />
+                </div>
 
-                <label className="field-label">Metadata (JSON)</label>
-                <textarea
-                  name="metadata"
-                  defaultValue={editing?.metadata ? JSON.stringify(editing.metadata, null, 2) : "{}"}
-                />
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Docker Image</span>
+                    <span className="type-pill">Image</span>
+                  </label>
+                  <input name="dockerImage" placeholder="例如 ghcr.io/org/openclaw:v2026.02.26" required defaultValue={editing?.docker_image ?? ""} />
+                </div>
 
-                <SubmitButton pendingText={editing ? "更新中..." : "创建中..."}>{editing ? "更新" : "创建"}</SubmitButton>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Status</span>
+                    <span className="type-pill">Enum</span>
+                  </label>
+                  <div className="chip-row">
+                    {["active", "archived"].map((item) => (
+                      <label key={item} className="chip">
+                        <input type="radio" name="status" value={item} defaultChecked={(editing?.status ?? "active") === item} />
+                        {item}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Description</span>
+                    <span className="type-pill">Optional</span>
+                  </label>
+                  <TextareaWithFileUpload name="description" placeholder="描述" defaultValue={editing?.description ?? ""} accept=".txt,.md" />
+                </div>
+
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">OpenAPI Spec (JSON)</span>
+                    <span className="type-pill">JSON</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="openapiSpec"
+                    required
+                    accept=".json,.yaml,.yml,.txt"
+                    hint="支持粘贴或上传 OpenAPI 文件"
+                    defaultValue={
+                      editing?.openapi_spec
+                        ? JSON.stringify(editing.openapi_spec, null, 2)
+                        : JSON.stringify(defaultOpenApiSpec, null, 2)
+                    }
+                  />
+                </div>
+
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Metadata (JSON)</span>
+                    <span className="type-pill">Optional</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="metadata"
+                    accept=".json,.txt"
+                    defaultValue={editing?.metadata ? JSON.stringify(editing.metadata, null, 2) : "{}"}
+                  />
+                </div>
+
               </form>
-              {editing ? (
-                <form action={deleteAgent} className="menu-form">
-                  <input type="hidden" name="id" value={editing.id} />
-                  <input type="hidden" name="q" value={filters.q} />
-                  <input type="hidden" name="statusFilter" value={filters.status} />
-                  <input type="hidden" name="keyLike" value={filters.keyLike} />
-                  <SubmitButton type="submit" className="text-btn danger" pendingText="删除中...">
-                    删除
-                  </SubmitButton>
-                </form>
-              ) : null}
+              <div className="drawer-actions">
+                <SubmitButton
+                  form={editing ? `agent-form-${editing.id}` : "agent-form-create"}
+                  className="primary-btn"
+                  pendingText={editing ? "更新中..." : "创建中..."}
+                >
+                  {editing ? "更新" : "创建"}
+                </SubmitButton>
+                {editing ? (
+                  <form action={deleteAgent} className="drawer-inline-form">
+                    <input type="hidden" name="id" value={editing.id} />
+                    <input type="hidden" name="q" value={filters.q} />
+                    <input type="hidden" name="statusFilter" value={filters.status} />
+                    <input type="hidden" name="keyLike" value={filters.keyLike} />
+                    <SubmitButton type="submit" className="danger-btn" pendingText="删除中...">
+                      删除
+                    </SubmitButton>
+                  </form>
+                ) : null}
+                <Link href={listHref} className="ghost-btn">
+                  取消
+                </Link>
+              </div>
             </div>
           </aside>
         </div>

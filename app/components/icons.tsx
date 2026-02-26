@@ -138,6 +138,16 @@ export function ArrowLeftIcon(props: IconProps) {
   );
 }
 
+export function OpenInNewIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M14 5h5v5" />
+      <path d="m19 5-8 8" />
+      <path d="M19 13v5a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1h5" />
+    </BaseIcon>
+  );
+}
+
 export function UserIcon(props: IconProps) {
   return (
     <BaseIcon {...props}>

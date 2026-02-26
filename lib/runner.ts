@@ -21,8 +21,9 @@ export async function runExperiment(experimentId: number, triggeredBy: string) {
       }>(
         `SELECT e.id, e.dataset_id, e.name, e.agent_id, a.agent_key, a.version AS agent_version, a.docker_image
          FROM experiments e
-         JOIN agents a ON a.id = e.agent_id
-         WHERE e.id = $1`,
+         JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
+         JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
+         WHERE e.id = $1 AND e.deleted_at IS NULL`,
         [experimentId]
       );
 
@@ -30,7 +31,7 @@ export async function runExperiment(experimentId: number, triggeredBy: string) {
         throw new Error("Experiment not found");
       }
 
-      await tx.query(`UPDATE experiments SET status = 'running' WHERE id = $1`, [experimentId]);
+      await tx.query(`UPDATE experiments SET status = 'running' WHERE id = $1 AND deleted_at IS NULL`, [experimentId]);
 
       let runId = 0;
       if (engine === "mysql") {
@@ -58,7 +59,9 @@ export async function runExperiment(experimentId: number, triggeredBy: string) {
         reference_output: unknown;
       }>(
         `SELECT id, session_jsonl, user_input, reference_trajectory, reference_output
-         FROM data_items WHERE dataset_id = $1 ORDER BY created_at ASC`,
+         FROM data_items
+         WHERE dataset_id = $1 AND deleted_at IS NULL
+         ORDER BY created_at ASC`,
         [exp.rows[0].dataset_id]
       );
 
@@ -116,12 +119,12 @@ export async function runExperiment(experimentId: number, triggeredBy: string) {
         [runId, JSON.stringify(summary)]
       );
 
-      await tx.query(`UPDATE experiments SET status = 'ready' WHERE id = $1`, [experimentId]);
+      await tx.query(`UPDATE experiments SET status = 'ready' WHERE id = $1 AND deleted_at IS NULL`, [experimentId]);
 
       return { runId, summary };
     });
   } catch (error) {
-    await dbQuery(`UPDATE experiments SET status = 'failed' WHERE id = $1`, [experimentId]);
+    await dbQuery(`UPDATE experiments SET status = 'failed' WHERE id = $1 AND deleted_at IS NULL`, [experimentId]);
     throw error;
   }
 }

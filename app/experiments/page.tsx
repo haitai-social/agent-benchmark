@@ -3,8 +3,10 @@ import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
 import { requireUser } from "@/lib/supabase-auth";
 import Link from "next/link";
-import { FilterIcon, FlaskIcon, PlusIcon, SearchIcon } from "../components/icons";
+import { FilterIcon, FlaskIcon, OpenInNewIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
+import { EntityDrawer } from "../components/entity-drawer";
+import { FormField } from "../components/form-field";
 
 function buildListHref(q: string, status: string, datasetLike: string, agentLike: string) {
   const params = new URLSearchParams();
@@ -29,19 +31,78 @@ async function createExperiment(formData: FormData) {
   const datasetLike = String(formData.get("datasetLike") ?? "").trim();
   const agentLike = String(formData.get("agentLike") ?? "").trim();
 
-  if (!name) {
-    throw new Error("实验名称不能为空");
-  }
-  if (!datasetIdRaw || !Number.isInteger(datasetId) || datasetId <= 0) {
-    throw new Error("评测集 ID 非法。");
-  }
-  if (!agentIdRaw || !Number.isInteger(agentId) || agentId <= 0) {
-    throw new Error("Agent ID 非法。");
+  if (!name || !datasetIdRaw || !agentIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(agentId) || agentId <= 0) {
+    return;
   }
 
   await dbQuery(
-    `INSERT INTO experiments (name, dataset_id, agent_id, status, created_by, updated_by) VALUES ($1,$2,$3,'ready',$4,$4)`,
+    `INSERT INTO experiments (name, dataset_id, agent_id, status, created_by, updated_by)
+     SELECT $1, $2, $3, 'ready', $4, $4
+     FROM datasets d
+     JOIN agents a ON a.id = $3
+     WHERE d.id = $2
+       AND d.deleted_at IS NULL
+       AND a.deleted_at IS NULL`,
     [name, datasetId, agentId, user.id]
+  );
+  revalidatePath("/experiments");
+  redirect(buildListHref(q, status, datasetLike, agentLike));
+}
+
+async function updateExperiment(formData: FormData) {
+  "use server";
+  const user = await requireUser();
+
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
+  const name = String(formData.get("name") ?? "").trim();
+  const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
+  const datasetId = Number(datasetIdRaw);
+  const agentIdRaw = String(formData.get("agentId") ?? "").trim();
+  const agentId = Number(agentIdRaw);
+  const expStatus = String(formData.get("expStatus") ?? "ready").trim() || "ready";
+
+  const q = String(formData.get("q") ?? "").trim();
+  const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
+  const datasetLike = String(formData.get("datasetLike") ?? "").trim();
+  const agentLike = String(formData.get("agentLike") ?? "").trim();
+
+  if (!idRaw || !name || !datasetIdRaw || !agentIdRaw || !Number.isInteger(id) || id <= 0 || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(agentId) || agentId <= 0) {
+    return;
+  }
+
+  await dbQuery(
+    `UPDATE experiments
+     SET name = $2, dataset_id = $3, agent_id = $4, status = $5, updated_by = $6, updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1
+       AND deleted_at IS NULL
+       AND EXISTS (SELECT 1 FROM datasets d WHERE d.id = $3 AND d.deleted_at IS NULL)
+       AND EXISTS (SELECT 1 FROM agents a WHERE a.id = $4 AND a.deleted_at IS NULL)`,
+    [id, name, datasetId, agentId, expStatus, user.id]
+  );
+  revalidatePath("/experiments");
+  redirect(buildListHref(q, status, datasetLike, agentLike));
+}
+
+async function deleteExperiment(formData: FormData) {
+  "use server";
+  const user = await requireUser();
+
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
+  const q = String(formData.get("q") ?? "").trim();
+  const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
+  const datasetLike = String(formData.get("datasetLike") ?? "").trim();
+  const agentLike = String(formData.get("agentLike") ?? "").trim();
+  if (!idRaw || !Number.isInteger(id) || id <= 0) return;
+  await dbQuery(
+    `UPDATE experiments
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP,
+         updated_by = $2,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [id, user.id]
   );
   revalidatePath("/experiments");
   redirect(buildListHref(q, status, datasetLike, agentLike));
@@ -50,17 +111,18 @@ async function createExperiment(formData: FormData) {
 export default async function ExperimentsPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; status?: string; datasetLike?: string; agentLike?: string; panel?: string }>;
+  searchParams: Promise<{ q?: string; status?: string; datasetLike?: string; agentLike?: string; panel?: string; id?: string }>;
 }) {
   await requireUser();
 
-  const { q = "", status = "all", datasetLike = "", agentLike = "", panel = "none" } = await searchParams;
+  const { q = "", status = "all", datasetLike = "", agentLike = "", panel = "none", id = "" } = await searchParams;
   const filters = {
     q: q.trim(),
     status: status.trim() || "all",
     datasetLike: datasetLike.trim(),
     agentLike: agentLike.trim()
   };
+  const editingId = Number(id.trim());
   const creating = panel === "create";
   const filtering = panel === "filter";
 
@@ -69,10 +131,13 @@ export default async function ExperimentsPage({
   const filterHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=filter`;
   const hasFilter = filters.status !== "all" || !!filters.datasetLike || !!filters.agentLike;
 
-  const [datasets, agents, experiments] = await Promise.all([
-    dbQuery<{ id: number; name: string }>(`SELECT id, name FROM datasets ORDER BY created_at DESC`),
+  const [datasets, agents, experiments, editing] = await Promise.all([
+    dbQuery<{ id: number; name: string }>(`SELECT id, name FROM datasets WHERE deleted_at IS NULL ORDER BY created_at DESC`),
     dbQuery<{ id: number; name: string; agent_key: string; version: string }>(
-      `SELECT id, name, agent_key, version FROM agents WHERE status = 'active' ORDER BY updated_at DESC`
+      `SELECT id, name, agent_key, version
+       FROM agents
+       WHERE deleted_at IS NULL AND status = 'active'
+       ORDER BY updated_at DESC`
     ),
     dbQuery<{
       id: number;
@@ -89,9 +154,10 @@ export default async function ExperimentsPage({
               a.id AS agent_id, a.agent_key, a.version AS agent_version,
               e.status, e.created_at
        FROM experiments e
-       JOIN datasets d ON d.id = e.dataset_id
-       JOIN agents a ON a.id = e.agent_id
+       JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
+       JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
        WHERE ($1 = '' OR LOWER(e.name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(a.version) LIKE CONCAT('%', LOWER($4), '%'))
+         AND e.deleted_at IS NULL
          AND ($5 = 'all' OR e.status = $6)
          AND ($7 = '' OR LOWER(d.name) LIKE CONCAT('%', LOWER($8), '%'))
          AND ($9 = '' OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($10), '%'))
@@ -108,8 +174,17 @@ export default async function ExperimentsPage({
         filters.agentLike,
         filters.agentLike
       ]
-    )
+    ),
+    Number.isInteger(editingId) && editingId > 0
+      ? dbQuery<{ id: number; name: string; dataset_id: number; agent_id: number; status: string }>(
+          `SELECT id, name, dataset_id, agent_id, status FROM experiments WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+          [editingId]
+        )
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; name: string; dataset_id: number; agent_id: number; status: string }>; rowCount: number })
   ]);
+
+  const editingRow = editing.rowCount > 0 ? editing.rows[0] : null;
+  const showEditor = creating || Boolean(editingRow);
 
   return (
     <div className="grid">
@@ -170,6 +245,7 @@ export default async function ExperimentsPage({
               <th>Agent</th>
               <th>状态</th>
               <th>创建时间</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -188,6 +264,26 @@ export default async function ExperimentsPage({
                   <span className={`status-pill ${e.status}`}>{e.status}</span>
                 </td>
                 <td>{new Date(e.created_at).toLocaleString()}</td>
+                <td>
+                  <div className="row-actions">
+                    <Link href={`${listHref}${listHref.includes("?") ? "&" : "?"}id=${e.id}`} className="text-btn">
+                      详情
+                    </Link>
+                    <Link href={`/experiments/${e.id}`} className="text-btn">
+                      运行
+                    </Link>
+                    <form action={deleteExperiment}>
+                      <input type="hidden" name="id" value={e.id} />
+                      <input type="hidden" name="q" value={filters.q} />
+                      <input type="hidden" name="statusFilter" value={filters.status} />
+                      <input type="hidden" name="datasetLike" value={filters.datasetLike} />
+                      <input type="hidden" name="agentLike" value={filters.agentLike} />
+                      <SubmitButton className="text-btn danger" pendingText="删除中...">
+                        删除
+                      </SubmitButton>
+                    </form>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -237,51 +333,91 @@ export default async function ExperimentsPage({
         </div>
       ) : null}
 
-      {creating ? (
-        <div className="action-overlay">
-          <Link href={listHref || "/experiments"} className="action-overlay-dismiss" aria-label="关闭抽屉蒙层" />
-          <aside className="action-drawer">
-            <div className="action-drawer-header">
-              <h3>新建 Experiment</h3>
-              <Link href={listHref || "/experiments"} className="icon-btn" aria-label="关闭">
-                <span style={{ fontSize: 18, lineHeight: 1 }}>×</span>
+      {showEditor ? (
+        <EntityDrawer
+          closeHref={listHref || "/experiments"}
+          title={editingRow ? "Experiment 详情" : "新建 Experiment"}
+          headerActions={
+            editingRow ? (
+              <Link href={`/experiments/${editingRow.id}`} className="icon-btn" aria-label="打开 Experiment 详情页">
+                <OpenInNewIcon width={16} height={16} />
               </Link>
-            </div>
-            <div className="action-drawer-body">
-              <form action={createExperiment} className="menu-form">
+            ) : null
+          }
+        >
+          <form
+            id={editingRow ? `experiment-form-${editingRow.id}` : "experiment-form-create"}
+            action={editingRow ? updateExperiment : createExperiment}
+            className="menu-form form-tone-green"
+          >
+            {editingRow ? <input type="hidden" name="id" value={editingRow.id} /> : null}
+            <input type="hidden" name="q" value={filters.q} />
+            <input type="hidden" name="statusFilter" value={filters.status} />
+            <input type="hidden" name="datasetLike" value={filters.datasetLike} />
+            <input type="hidden" name="agentLike" value={filters.agentLike} />
+
+            <FormField title="Experiment 名称" typeLabel="String" required>
+              <input name="name" placeholder="Experiment 名称" required defaultValue={editingRow?.name ?? ""} />
+            </FormField>
+            <FormField title="选择 Dataset" typeLabel="FK" required>
+              <select name="datasetId" required defaultValue={editingRow ? String(editingRow.dataset_id) : ""}>
+                <option value="" disabled>
+                  选择 Dataset
+                </option>
+                {datasets.rows.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+            <FormField title="选择 Agent 版本" typeLabel="FK" required>
+              <select name="agentId" required defaultValue={editingRow ? String(editingRow.agent_id) : ""}>
+                <option value="" disabled>
+                  选择 Agent 版本
+                </option>
+                {agents.rows.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {`${a.name} (${a.agent_key}@${a.version})`}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+            <FormField title="状态" typeLabel="Enum">
+              <select name="expStatus" defaultValue={editingRow?.status ?? "ready"}>
+                {["ready", "running", "completed", "failed"].map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+          </form>
+          <div className="drawer-actions">
+            <SubmitButton
+              form={editingRow ? `experiment-form-${editingRow.id}` : "experiment-form-create"}
+              className="primary-btn"
+              pendingText={editingRow ? "更新中..." : "创建中..."}
+            >
+              {editingRow ? "更新" : "创建"}
+            </SubmitButton>
+            {editingRow ? (
+              <form action={deleteExperiment} className="drawer-inline-form">
+                <input type="hidden" name="id" value={editingRow.id} />
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="statusFilter" value={filters.status} />
                 <input type="hidden" name="datasetLike" value={filters.datasetLike} />
                 <input type="hidden" name="agentLike" value={filters.agentLike} />
-                <label className="field-label">Experiment 名称</label>
-                <input name="name" placeholder="Experiment 名称" required />
-                <label className="field-label">选择 Dataset</label>
-                <select name="datasetId" required defaultValue="">
-                  <option value="" disabled>
-                    选择 Dataset
-                  </option>
-                  {datasets.rows.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
-                </select>
-                <label className="field-label">选择 Agent 版本</label>
-                <select name="agentId" required defaultValue="">
-                  <option value="" disabled>
-                    选择 Agent 版本
-                  </option>
-                  {agents.rows.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {`${a.name} (${a.agent_key}@${a.version})`}
-                    </option>
-                  ))}
-                </select>
-                <SubmitButton pendingText="创建中...">创建</SubmitButton>
+                <SubmitButton className="danger-btn" pendingText="删除中...">
+                  删除
+                </SubmitButton>
               </form>
-            </div>
-          </aside>
-        </div>
+            ) : null}
+            <Link href={listHref || "/experiments"} className="ghost-btn">
+              取消
+            </Link>
+          </div>
+        </EntityDrawer>
       ) : null}
     </div>
   );

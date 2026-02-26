@@ -4,8 +4,11 @@ CREATE TABLE IF NOT EXISTS datasets (
   description TEXT NOT NULL,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_datasets_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS data_items (
@@ -18,10 +21,13 @@ CREATE TABLE IF NOT EXISTS data_items (
   reference_trajectory JSON,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_data_items_dataset
-    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE,
+  INDEX idx_data_items_dataset_deleted (dataset_id, is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS evaluators (
@@ -33,8 +39,11 @@ CREATE TABLE IF NOT EXISTS evaluators (
   model_name VARCHAR(255) NOT NULL DEFAULT 'gpt-4.1-mini',
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_evaluators_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS traces (
@@ -49,7 +58,10 @@ CREATE TABLE IF NOT EXISTS traces (
   end_time DATETIME,
   status VARCHAR(100),
   raw JSON NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_traces_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -64,11 +76,14 @@ CREATE TABLE IF NOT EXISTS agents (
   metadata JSON NOT NULL,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT uq_agents_key_version UNIQUE (agent_key, version),
   INDEX idx_agents_key (agent_key),
-  INDEX idx_agents_status (status)
+  INDEX idx_agents_status (status),
+  INDEX idx_agents_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS experiments (
@@ -79,11 +94,15 @@ CREATE TABLE IF NOT EXISTS experiments (
   status VARCHAR(100) NOT NULL DEFAULT 'draft',
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_experiments_dataset
     FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE RESTRICT,
   CONSTRAINT fk_experiments_agent
-    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE RESTRICT
+    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE RESTRICT,
+  INDEX idx_experiments_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS experiment_runs (

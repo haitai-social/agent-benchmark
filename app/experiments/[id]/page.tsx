@@ -41,9 +41,9 @@ export default async function ExperimentDetailPage({ params }: { params: Promise
               a.agent_key, a.version AS agent_version, a.docker_image,
               e.status, e.created_at
        FROM experiments e
-       JOIN datasets d ON d.id = e.dataset_id
-       JOIN agents a ON a.id = e.agent_id
-       WHERE e.id = $1`,
+       JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
+       JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
+       WHERE e.id = $1 AND e.deleted_at IS NULL`,
       [id]
     ),
     dbQuery<{ id: number; status: string; started_at: string; finished_at: string | null; summary: Record<string, unknown> }>(

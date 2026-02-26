@@ -6,13 +6,13 @@ export default async function HomePage() {
   await requireUser();
 
   const [datasets, items, agents, evaluators, experiments, runs, traces] = await Promise.all([
-    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM datasets"),
-    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM data_items"),
-    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM agents"),
-    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM evaluators"),
-    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM experiments"),
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM datasets WHERE deleted_at IS NULL"),
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM data_items WHERE deleted_at IS NULL"),
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM agents WHERE deleted_at IS NULL"),
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM evaluators WHERE deleted_at IS NULL"),
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM experiments WHERE deleted_at IS NULL"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM experiment_runs"),
-    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM traces")
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM traces WHERE deleted_at IS NULL")
   ]);
 
   const cards = [

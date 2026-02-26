@@ -3,8 +3,10 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
 import { requireUser } from "@/lib/supabase-auth";
-import { DatasetIcon, FilterIcon, PlusIcon, SearchIcon } from "../components/icons";
+import { DatasetIcon, FilterIcon, OpenInNewIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
+import { EntityDrawer } from "../components/entity-drawer";
+import { FormField } from "../components/form-field";
 
 async function createDataset(formData: FormData) {
   "use server";
@@ -19,7 +21,7 @@ async function createDataset(formData: FormData) {
   await dbQuery(
     `INSERT INTO datasets (name, description, created_by, updated_by, updated_at)
      SELECT $1, $2, $3, $3, CURRENT_TIMESTAMP
-     WHERE NOT EXISTS (SELECT 1 FROM datasets WHERE name = $4)`,
+     WHERE NOT EXISTS (SELECT 1 FROM datasets WHERE name = $4 AND deleted_at IS NULL)`,
     [name, description, user.id, name]
   );
   revalidatePath("/datasets");
@@ -32,26 +34,82 @@ async function createDataset(formData: FormData) {
 
 async function deleteDataset(formData: FormData) {
   "use server";
-  await requireUser();
+  const user = await requireUser();
 
   const idRaw = String(formData.get("id") ?? "").trim();
   const id = Number(idRaw);
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
-  await dbQuery(`DELETE FROM datasets WHERE id = $1`, [id]);
+  await dbQuery(
+    `UPDATE datasets
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP,
+         updated_by = $2,
+         updated_at = CURRENT_TIMESTAMP,
+         name = CONCAT(name, '__deleted__', id)
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [id, user.id]
+  );
+  await dbQuery(
+    `UPDATE data_items
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP,
+         updated_by = $2,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE dataset_id = $1 AND deleted_at IS NULL`,
+    [id, user.id]
+  );
+  await dbQuery(
+    `UPDATE experiments
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP,
+         updated_by = $2,
+         updated_at = CURRENT_TIMESTAMP,
+         status = 'archived'
+     WHERE dataset_id = $1 AND deleted_at IS NULL`,
+    [id, user.id]
+  );
   revalidatePath("/datasets");
+  revalidatePath("/experiments");
+}
+
+async function updateDataset(formData: FormData) {
+  "use server";
+  const user = await requireUser();
+
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
+  const name = String(formData.get("name") ?? "").trim();
+  const description = String(formData.get("description") ?? "").trim();
+  const q = String(formData.get("q") ?? "").trim();
+  const minItems = String(formData.get("minItems") ?? "all").trim() || "all";
+  const updatedIn = String(formData.get("updatedIn") ?? "all").trim() || "all";
+  if (!idRaw || !Number.isInteger(id) || id <= 0 || !name) return;
+  await dbQuery(`UPDATE datasets SET name = $2, description = $3, updated_by = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND deleted_at IS NULL`, [
+    id,
+    name,
+    description,
+    user.id
+  ]);
+  revalidatePath("/datasets");
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (minItems !== "all") params.set("minItems", minItems);
+  if (updatedIn !== "all") params.set("updatedIn", updatedIn);
+  redirect(params.size > 0 ? `/datasets?${params.toString()}` : "/datasets");
 }
 
 export default async function DatasetsPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; panel?: string; minItems?: string; updatedIn?: string }>;
+  searchParams: Promise<{ q?: string; panel?: string; minItems?: string; updatedIn?: string; id?: string }>;
 }) {
   await requireUser();
 
-  const { q = "", panel = "none", minItems = "all", updatedIn = "all" } = await searchParams;
+  const { q = "", panel = "none", minItems = "all", updatedIn = "all", id = "" } = await searchParams;
   const queryText = q.trim();
   const creating = panel === "create";
   const filtering = panel === "filter";
+  const editingId = Number(id.trim());
 
   const minItemsValue = minItems === "all" ? null : Number(minItems);
   const minItemsFilter =
@@ -77,8 +135,9 @@ export default async function DatasetsPage({
       d.updated_at,
       COUNT(i.id) AS item_count
      FROM datasets d
-     LEFT JOIN data_items i ON i.dataset_id = d.id
+     LEFT JOIN data_items i ON i.dataset_id = d.id AND i.deleted_at IS NULL
      WHERE ($1 = '' OR LOWER(d.name) LIKE CONCAT('%', LOWER($2), '%'))
+       AND d.deleted_at IS NULL
        AND ($3 IS NULL OR d.updated_at >= $4)
      GROUP BY d.id, d.name, d.description, d.created_by, d.updated_by, d.updated_at
      HAVING ($5 IS NULL OR COUNT(i.id) >= $6)
@@ -94,6 +153,8 @@ export default async function DatasetsPage({
   const createHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=create`;
   const filterHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=filter`;
   const hasFilter = minItems !== "all" || updatedIn !== "all";
+  const editingRow = Number.isInteger(editingId) && editingId > 0 ? rows.find((r) => r.id === editingId) ?? null : null;
+  const showEditor = creating || Boolean(editingRow);
 
   return (
     <div className="grid">
@@ -180,7 +241,7 @@ export default async function DatasetsPage({
                 <td>{new Date(row.updated_at).toLocaleString()}</td>
                 <td>
                   <div className="row-actions">
-                    <Link href={`/datasets/${row.id}`} className="text-btn">
+                    <Link href={`${listHref}${listHref.includes("?") ? "&" : "?"}id=${row.id}`} className="text-btn">
                       详情
                     </Link>
                     <form action={deleteDataset}>
@@ -243,30 +304,55 @@ export default async function DatasetsPage({
         </div>
       ) : null}
 
-      {creating ? (
-        <div className="action-overlay">
-          <Link href={listHref || "/datasets"} className="action-overlay-dismiss" aria-label="关闭抽屉蒙层" />
-          <aside className="action-drawer">
-            <div className="action-drawer-header">
-              <h3>新建 Dataset</h3>
-              <Link href={listHref || "/datasets"} className="icon-btn" aria-label="关闭">
-                <span style={{ fontSize: 18, lineHeight: 1 }}>×</span>
+      {showEditor ? (
+        <EntityDrawer
+          closeHref={listHref || "/datasets"}
+          title={editingRow ? "Dataset 详情" : "新建 Dataset"}
+          headerActions={
+            editingRow ? (
+              <Link href={`/datasets/${editingRow.id}`} className="icon-btn" aria-label="打开 DataItems 页">
+                <OpenInNewIcon width={16} height={16} />
               </Link>
-            </div>
-            <div className="action-drawer-body">
-              <form action={createDataset} className="menu-form">
-                <input type="hidden" name="q" value={queryText} />
-                <input type="hidden" name="minItems" value={minItems} />
-                <input type="hidden" name="updatedIn" value={updatedIn} />
-                <label className="field-label">Dataset 名称</label>
-                <input name="name" placeholder="Dataset 名称" required />
-                <label className="field-label">描述</label>
-                <textarea name="description" placeholder="描述" />
-                <SubmitButton pendingText="创建中...">创建</SubmitButton>
+            ) : null
+          }
+        >
+          <form
+            id={editingRow ? `dataset-form-${editingRow.id}` : "dataset-form-create"}
+            action={editingRow ? updateDataset : createDataset}
+            className="menu-form form-tone-green"
+          >
+            {editingRow ? <input type="hidden" name="id" value={editingRow.id} /> : null}
+            <input type="hidden" name="q" value={queryText} />
+            <input type="hidden" name="minItems" value={minItems} />
+            <input type="hidden" name="updatedIn" value={updatedIn} />
+            <FormField title="Dataset 名称" typeLabel="String" required>
+              <input name="name" placeholder="Dataset 名称" required defaultValue={editingRow?.name ?? ""} />
+            </FormField>
+            <FormField title="描述" typeLabel="Optional">
+              <textarea name="description" placeholder="描述" defaultValue={editingRow?.description ?? ""} />
+            </FormField>
+          </form>
+          <div className="drawer-actions">
+            <SubmitButton
+              form={editingRow ? `dataset-form-${editingRow.id}` : "dataset-form-create"}
+              className="primary-btn"
+              pendingText={editingRow ? "更新中..." : "创建中..."}
+            >
+              {editingRow ? "更新" : "创建"}
+            </SubmitButton>
+            {editingRow ? (
+              <form action={deleteDataset} className="drawer-inline-form">
+                <input type="hidden" name="id" value={editingRow.id} />
+                <SubmitButton className="danger-btn" pendingText="删除中...">
+                  删除
+                </SubmitButton>
               </form>
-            </div>
-          </aside>
-        </div>
+            ) : null}
+            <Link href={listHref || "/datasets"} className="ghost-btn">
+              取消
+            </Link>
+          </div>
+        </EntityDrawer>
       ) : null}
     </div>
   );

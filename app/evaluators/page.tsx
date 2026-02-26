@@ -5,6 +5,7 @@ import { dbQuery } from "@/lib/db";
 import { requireUser } from "@/lib/supabase-auth";
 import { FilterIcon, JudgeIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
+import { TextareaWithFileUpload } from "../components/textarea-with-file-upload";
 
 function buildListHref(q: string, provider: string, model: string) {
   const params = new URLSearchParams();
@@ -32,7 +33,7 @@ async function createEvaluator(formData: FormData) {
   await dbQuery(
     `INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by, updated_at)
      SELECT $1, $2, $3, $4, $5, $6, $6, CURRENT_TIMESTAMP
-     WHERE NOT EXISTS (SELECT 1 FROM evaluators WHERE evaluator_key = $7)`,
+     WHERE NOT EXISTS (SELECT 1 FROM evaluators WHERE evaluator_key = $7 AND deleted_at IS NULL)`,
     [evaluatorKey, name, promptTemplate, baseUrl, modelName, user.id, evaluatorKey]
   );
 
@@ -60,7 +61,7 @@ async function updateEvaluator(formData: FormData) {
   await dbQuery(
     `UPDATE evaluators
      SET evaluator_key = $2, name = $3, prompt_template = $4, base_url = $5, model_name = $6, updated_by = $7, updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1`,
+     WHERE id = $1 AND deleted_at IS NULL`,
     [id, evaluatorKey, name, promptTemplate, baseUrl, modelName, user.id]
   );
 
@@ -70,7 +71,7 @@ async function updateEvaluator(formData: FormData) {
 
 async function deleteEvaluator(formData: FormData) {
   "use server";
-  await requireUser();
+  const user = await requireUser();
 
   const idRaw = String(formData.get("id") ?? "").trim();
   const id = Number(idRaw);
@@ -78,7 +79,16 @@ async function deleteEvaluator(formData: FormData) {
   const provider = String(formData.get("provider") ?? "all").trim() || "all";
   const model = String(formData.get("model") ?? "").trim();
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
-  await dbQuery(`DELETE FROM evaluators WHERE id = $1`, [id]);
+  await dbQuery(
+    `UPDATE evaluators
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP,
+         updated_by = $2,
+         updated_at = CURRENT_TIMESTAMP,
+         evaluator_key = CONCAT(evaluator_key, '__deleted__', id)
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [id, user.id]
+  );
   revalidatePath("/evaluators");
   redirect(buildListHref(q, provider, model));
 }
@@ -108,6 +118,7 @@ export default async function EvaluatorsPage({
     `SELECT id, evaluator_key, name, prompt_template, base_url, model_name
      FROM evaluators
      WHERE ($1 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(evaluator_key) LIKE CONCAT('%', LOWER($3), '%'))
+       AND deleted_at IS NULL
        AND ($4 = '' OR LOWER(model_name) LIKE CONCAT('%', LOWER($5), '%'))
        AND (
          $6 = 'all'
@@ -281,54 +292,95 @@ export default async function EvaluatorsPage({
               </Link>
             </div>
             <div className="action-drawer-body">
-              <form action={editing ? updateEvaluator : createEvaluator} className="menu-form">
+              <form
+                id={editing ? `evaluator-form-${editing.id}` : "evaluator-form-create"}
+                action={editing ? updateEvaluator : createEvaluator}
+                className="menu-form form-tone-green"
+              >
                 {editing ? <input type="hidden" name="id" value={editing.id} /> : null}
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="provider" value={filters.provider} />
                 <input type="hidden" name="model" value={filters.model} />
-                <label className="field-label">Evaluator 名称</label>
-                <input name="name" placeholder="Evaluator 名称" required defaultValue={editing?.name ?? ""} />
-                <label className="field-label">Evaluator Key</label>
-                <input
-                  name="evaluatorKey"
-                  placeholder="evaluator key（唯一）"
-                  required
-                  defaultValue={editing?.evaluator_key ?? ""}
-                />
-                <label className="field-label">Base URL</label>
-                <input
-                  name="baseUrl"
-                  placeholder="Base URL（如 https://api.openai.com/v1）"
-                  required
-                  defaultValue={editing?.base_url ?? "https://api.openai.com/v1"}
-                />
-                <label className="field-label">Model Name</label>
-                <input
-                  name="modelName"
-                  placeholder="Model Name（如 gpt-4.1-mini）"
-                  required
-                  defaultValue={editing?.model_name ?? "gpt-4.1-mini"}
-                />
-                <label className="field-label">Prompt Template</label>
-                <textarea
-                  name="promptTemplate"
-                  placeholder="评估 Prompt 模板"
-                  required
-                  defaultValue={editing?.prompt_template ?? ""}
-                />
-                <SubmitButton pendingText={editing ? "更新中..." : "创建中..."}>{editing ? "更新" : "创建"}</SubmitButton>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Evaluator 名称</span>
+                    <span className="type-pill">String</span>
+                  </label>
+                  <input name="name" placeholder="Evaluator 名称" required defaultValue={editing?.name ?? ""} />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Evaluator Key</span>
+                    <span className="type-pill">Unique</span>
+                  </label>
+                  <input
+                    name="evaluatorKey"
+                    placeholder="evaluator key（唯一）"
+                    required
+                    defaultValue={editing?.evaluator_key ?? ""}
+                  />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Base URL</span>
+                    <span className="type-pill">URL</span>
+                  </label>
+                  <input
+                    name="baseUrl"
+                    placeholder="Base URL（如 https://api.openai.com/v1）"
+                    required
+                    defaultValue={editing?.base_url ?? "https://api.openai.com/v1"}
+                  />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Model Name</span>
+                    <span className="type-pill">String</span>
+                  </label>
+                  <input
+                    name="modelName"
+                    placeholder="Model Name（如 gpt-4.1-mini）"
+                    required
+                    defaultValue={editing?.model_name ?? "gpt-4.1-mini"}
+                  />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">Prompt Template</span>
+                    <span className="type-pill">Text</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="promptTemplate"
+                    placeholder="评估 Prompt 模板"
+                    required
+                    accept=".txt,.md,.json"
+                    defaultValue={editing?.prompt_template ?? ""}
+                  />
+                </div>
               </form>
-              {editing ? (
-                <form action={deleteEvaluator} className="menu-form">
-                  <input type="hidden" name="id" value={editing.id} />
-                  <input type="hidden" name="q" value={filters.q} />
-                  <input type="hidden" name="provider" value={filters.provider} />
-                  <input type="hidden" name="model" value={filters.model} />
-                  <SubmitButton type="submit" className="text-btn danger" pendingText="删除中...">
-                    删除
-                  </SubmitButton>
-                </form>
-              ) : null}
+              <div className="drawer-actions">
+                <SubmitButton
+                  form={editing ? `evaluator-form-${editing.id}` : "evaluator-form-create"}
+                  className="primary-btn"
+                  pendingText={editing ? "更新中..." : "创建中..."}
+                >
+                  {editing ? "更新" : "创建"}
+                </SubmitButton>
+                {editing ? (
+                  <form action={deleteEvaluator} className="drawer-inline-form">
+                    <input type="hidden" name="id" value={editing.id} />
+                    <input type="hidden" name="q" value={filters.q} />
+                    <input type="hidden" name="provider" value={filters.provider} />
+                    <input type="hidden" name="model" value={filters.model} />
+                    <SubmitButton type="submit" className="danger-btn" pendingText="删除中...">
+                      删除
+                    </SubmitButton>
+                  </form>
+                ) : null}
+                <Link href={listHref} className="ghost-btn">
+                  取消
+                </Link>
+              </div>
             </div>
           </aside>
         </div>
