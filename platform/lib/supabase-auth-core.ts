@@ -34,18 +34,18 @@ export type RefreshSessionResult =
     };
 
 type SessionCookiePayload = {
-  v: 1;
+  v: 2;
   uid: string;
   email?: string;
   name?: string;
   avatarUrl?: string;
   exp: number;
-  fp: string;
 };
 
 const ACCESS_COOKIE = "sb-access-token";
 const REFRESH_COOKIE = "sb-refresh-token";
 const PROFILE_COOKIE = "ab-session";
+const DEFAULT_PROFILE_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
 export const AUTH_TOAST_COOKIE = "ab-auth-toast";
 export const AUTH_TOAST_NETWORK = "network";
 
@@ -70,6 +70,12 @@ export function getSupabasePublishableKey() {
 
 function getSessionCookieSecret() {
   return process.env.AUTH_SESSION_COOKIE_SECRET ?? process.env.SESSION_COOKIE_SECRET ?? "";
+}
+
+function getProfileCookieMaxAge() {
+  const raw = Number(process.env.AUTH_SESSION_MAX_AGE_SECONDS ?? DEFAULT_PROFILE_COOKIE_MAX_AGE);
+  if (!Number.isFinite(raw)) return DEFAULT_PROFILE_COOKIE_MAX_AGE;
+  return Math.max(60, Math.floor(raw));
 }
 
 function toBase64Url(bytes: Uint8Array) {
@@ -123,14 +129,6 @@ function classifyAuthFailure(status: number, message: string): AuthCheckReason {
   return "unknown_error";
 }
 
-async function getTokenFingerprint(accessToken: string) {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(accessToken));
-  const bytes = new Uint8Array(digest);
-  return Array.from(bytes)
-    .slice(0, 16)
-    .map((item) => item.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 async function signData(data: string, secret: string) {
   const key = await crypto.subtle.importKey(
@@ -155,11 +153,9 @@ function constantTimeEqual(a: Uint8Array, b: Uint8Array) {
 
 export async function buildSignedProfileCookie({
   user,
-  accessToken,
   expiresIn
 }: {
   user: AuthUser;
-  accessToken: string;
   expiresIn: number;
 }) {
   const secret = getSessionCookieSecret();
@@ -167,13 +163,12 @@ export async function buildSignedProfileCookie({
 
   const ttl = Number.isFinite(expiresIn) ? Math.max(60, Math.floor(expiresIn)) : 3600;
   const payload: SessionCookiePayload = {
-    v: 1,
+    v: 2,
     uid: user.id,
     email: user.email,
     name: user.name,
     avatarUrl: user.avatarUrl,
-    exp: Math.floor(Date.now() / 1000) + ttl,
-    fp: await getTokenFingerprint(accessToken)
+    exp: Math.floor(Date.now() / 1000) + ttl
   };
 
   const payloadBase64 = toBase64Url(encoder.encode(JSON.stringify(payload)));
@@ -182,14 +177,12 @@ export async function buildSignedProfileCookie({
 }
 
 export async function parseSignedProfileCookie({
-  rawCookie,
-  accessToken
+  rawCookie
 }: {
   rawCookie: string;
-  accessToken: string;
 }) {
   const secret = getSessionCookieSecret();
-  if (!secret || !rawCookie || !accessToken) return null;
+  if (!secret || !rawCookie) return null;
 
   const parts = rawCookie.split(".");
   if (parts.length !== 2) return null;
@@ -201,10 +194,8 @@ export async function parseSignedProfileCookie({
 
   try {
     const payload = JSON.parse(decoder.decode(fromBase64Url(payloadBase64))) as SessionCookiePayload;
-    if (payload.v !== 1 || !payload.uid) return null;
+    if (payload.v !== 2 || !payload.uid) return null;
     if (payload.exp <= Math.floor(Date.now() / 1000)) return null;
-    const currentFingerprint = await getTokenFingerprint(accessToken);
-    if (payload.fp !== currentFingerprint) return null;
 
     return {
       user: {
@@ -337,14 +328,15 @@ export async function setAuthCookies(
     maxAge: 60 * 60 * 24 * 30
   });
 
-  const profileCookie = await buildSignedProfileCookie({ user, accessToken, expiresIn: maxAge });
+  const profileMaxAge = getProfileCookieMaxAge();
+  const profileCookie = await buildSignedProfileCookie({ user, expiresIn: profileMaxAge });
   if (profileCookie) {
     response.cookies.set(PROFILE_COOKIE, profileCookie, {
       httpOnly: true,
       sameSite: "lax",
       secure,
       path: "/",
-      maxAge
+      maxAge: profileMaxAge
     });
   }
 }
