@@ -1,4 +1,4 @@
-import { dbQuery, withTransaction } from "./db";
+import { dbQuery, engine, withTransaction } from "./db";
 import { scoreByEvaluators } from "./judges";
 
 type RunSummary = {
@@ -13,12 +13,12 @@ function isEnvBuildable(snapshot: unknown) {
   return false;
 }
 
-export async function runExperiment(experimentId: string, triggeredBy: string) {
+export async function runExperiment(experimentId: number, triggeredBy: string) {
   try {
     return await withTransaction(async (tx) => {
       const exp = await tx.query<{
-      id: string;
-      dataset_id: string;
+      id: number;
+      dataset_id: number;
       agent_version: string;
       name: string;
       }>(
@@ -32,14 +32,26 @@ export async function runExperiment(experimentId: string, triggeredBy: string) {
 
       await tx.query(`UPDATE experiments SET status = 'running' WHERE id = $1`, [experimentId]);
 
-      const runId = crypto.randomUUID();
-      await tx.query(
-        `INSERT INTO experiment_runs (id, experiment_id, status, triggered_by) VALUES ($1, $2, 'running', $3)`,
-        [runId, experimentId, triggeredBy]
-      );
+      let runId = 0;
+      if (engine === "mysql") {
+        const inserted = await tx.query(
+          `INSERT INTO experiment_runs (experiment_id, status, triggered_by) VALUES ($1, 'running', $2)`,
+          [experimentId, triggeredBy]
+        );
+        runId = Number((inserted as { insertId?: number }).insertId ?? 0);
+      } else {
+        const inserted = await tx.query<{ id: number }>(
+          `INSERT INTO experiment_runs (experiment_id, status, triggered_by) VALUES ($1, 'running', $2) RETURNING id`,
+          [experimentId, triggeredBy]
+        );
+        runId = inserted.rows[0]?.id ?? 0;
+      }
+      if (!runId) {
+        throw new Error("Failed to create experiment run");
+      }
 
       const items = await tx.query<{
-        id: string;
+        id: number;
         environment_snapshot: unknown;
         user_input: string;
         agent_trajectory: unknown;

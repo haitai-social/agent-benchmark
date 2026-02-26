@@ -3,15 +3,22 @@ import { dbQuery } from "@/lib/db";
 import { requireUser } from "@/lib/supabase-auth";
 import Link from "next/link";
 import { FilterIcon, FlaskIcon, PlusIcon, RefreshIcon, SearchIcon } from "../components/icons";
+import { SubmitButton } from "../components/submit-button";
 
 async function createExperiment(formData: FormData) {
   "use server";
   const user = await requireUser();
 
   const name = String(formData.get("name") ?? "").trim();
-  const datasetId = String(formData.get("datasetId") ?? "").trim();
+  const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
+  const datasetId = Number(datasetIdRaw);
   const agentVersion = String(formData.get("agentVersion") ?? "v1").trim();
-  if (!name || !datasetId) return;
+  if (!name) {
+    throw new Error("实验名称不能为空");
+  }
+  if (!datasetIdRaw || !Number.isInteger(datasetId) || datasetId <= 0) {
+    throw new Error("评测集 ID 非法。若数据库仍是旧 UUID 结构，请先按最新 init SQL 重建。");
+  }
 
   await dbQuery(`INSERT INTO experiments (name, dataset_id, agent_version, status, created_by, updated_by) VALUES ($1,$2,$3,'ready',$4,$4)`, [
     name,
@@ -31,16 +38,21 @@ export default async function ExperimentsPage({
 
   const { q = "", dataset = "all", status = "all", panel = "none" } = await searchParams;
   const qv = q.trim();
+  const parsedDatasetFilter = dataset === "all" ? null : Number(dataset);
+  const datasetFilter =
+    typeof parsedDatasetFilter === "number" && Number.isInteger(parsedDatasetFilter) && parsedDatasetFilter > 0
+      ? parsedDatasetFilter
+      : null;
   const creating = panel === "create";
   const listHref = `/experiments${qv || dataset !== "all" || status !== "all" ? `?${new URLSearchParams({ ...(qv ? { q: qv } : {}), ...(dataset !== "all" ? { dataset } : {}), ...(status !== "all" ? { status } : {}) }).toString()}` : ""}`;
   const createHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=create`;
 
   const [datasets, experiments] = await Promise.all([
-    dbQuery<{ id: string; name: string }>(`SELECT id, name FROM datasets ORDER BY created_at DESC`),
+    dbQuery<{ id: number; name: string }>(`SELECT id, name FROM datasets ORDER BY created_at DESC`),
     dbQuery<{
-      id: string;
+      id: number;
       name: string;
-      dataset_id: string;
+      dataset_id: number;
       dataset_name: string;
       agent_version: string;
       status: string;
@@ -50,11 +62,11 @@ export default async function ExperimentsPage({
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id
        WHERE ($1 = '' OR LOWER(e.name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(e.agent_version) LIKE CONCAT('%', LOWER($3), '%'))
-         AND ($4 = 'all' OR e.dataset_id = $5)
+         AND ($4 IS NULL OR e.dataset_id = $5)
          AND ($6 = 'all' OR e.status = $7)
        ORDER BY e.created_at DESC`
       ,
-      [qv, qv, qv, dataset, dataset, status, status]
+      [qv, qv, qv, datasetFilter, datasetFilter, status, status]
     )
   ]);
 
@@ -172,7 +184,7 @@ export default async function ExperimentsPage({
                   ))}
                 </select>
                 <input name="agentVersion" placeholder="Agent 版本，例如 v2026.02.24" defaultValue="v1" />
-                <button type="submit">创建</button>
+                <SubmitButton pendingText="创建中...">创建</SubmitButton>
               </form>
             </div>
           </aside>

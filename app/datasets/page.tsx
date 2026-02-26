@@ -3,6 +3,7 @@ import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
 import { requireUser } from "@/lib/supabase-auth";
 import { FilterIcon, PlusIcon, RefreshIcon, SearchIcon } from "../components/icons";
+import { SubmitButton } from "../components/submit-button";
 
 async function createDataset(formData: FormData) {
   "use server";
@@ -24,8 +25,9 @@ async function deleteDataset(formData: FormData) {
   "use server";
   await requireUser();
 
-  const id = String(formData.get("id") ?? "");
-  if (!id) return;
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
+  if (!idRaw || !Number.isInteger(id) || id <= 0) return;
   await dbQuery(`DELETE FROM datasets WHERE id = $1`, [id]);
   revalidatePath("/datasets");
 }
@@ -42,7 +44,7 @@ export default async function DatasetsPage({
   const creating = panel === "create";
 
   const { rows } = await dbQuery<{
-    id: string;
+    id: number;
     name: string;
     description: string;
     item_count: number;
@@ -139,9 +141,9 @@ export default async function DatasetsPage({
                     </Link>
                     <form action={deleteDataset}>
                       <input type="hidden" name="id" value={row.id} />
-                      <button type="submit" className="text-btn danger">
+                      <SubmitButton className="text-btn danger" pendingText="删除中...">
                         删除
-                      </button>
+                      </SubmitButton>
                     </form>
                   </div>
                 </td>
@@ -166,7 +168,7 @@ export default async function DatasetsPage({
               <form action={createDataset} className="menu-form">
                 <input name="name" placeholder="评测集名称" required />
                 <textarea name="description" placeholder="描述" />
-                <button type="submit">创建</button>
+                <SubmitButton pendingText="创建中...">创建</SubmitButton>
               </form>
             </div>
           </aside>

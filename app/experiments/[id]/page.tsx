@@ -3,13 +3,15 @@ import { dbQuery } from "@/lib/db";
 import { runExperiment } from "@/lib/runner";
 import { requireUser } from "@/lib/supabase-auth";
 import { FlaskIcon } from "@/app/components/icons";
+import { SubmitButton } from "@/app/components/submit-button";
 
 async function runNow(formData: FormData) {
   "use server";
   const user = await requireUser();
 
-  const id = String(formData.get("id") ?? "");
-  if (!id) return;
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
+  if (!idRaw || !Number.isInteger(id) || id <= 0) return;
   await runExperiment(id, user.id);
   revalidatePath(`/experiments/${id}`);
   revalidatePath("/experiments");
@@ -18,11 +20,15 @@ async function runNow(formData: FormData) {
 export default async function ExperimentDetailPage({ params }: { params: Promise<{ id: string }> }) {
   await requireUser();
 
-  const { id } = await params;
+  const { id: idParam } = await params;
+  const id = Number(idParam.trim());
+  if (!Number.isInteger(id) || id <= 0) {
+    return <section className="card">实验不存在</section>;
+  }
 
   const [exp, runs, latestRunItems] = await Promise.all([
     dbQuery<{
-      id: string;
+      id: number;
       name: string;
       dataset_name: string;
       agent_version: string;
@@ -34,14 +40,14 @@ export default async function ExperimentDetailPage({ params }: { params: Promise
        WHERE e.id = $1`,
       [id]
     ),
-    dbQuery<{ id: string; status: string; started_at: string; finished_at: string | null; summary: Record<string, unknown> }>(
+    dbQuery<{ id: number; status: string; started_at: string; finished_at: string | null; summary: Record<string, unknown> }>(
       `SELECT id, status, started_at, finished_at, summary
        FROM experiment_runs WHERE experiment_id = $1 ORDER BY started_at DESC`,
       [id]
     ),
     dbQuery<{
-      run_id: string;
-      data_item_id: string;
+      run_id: number;
+      data_item_id: number;
       final_score: number;
       environment_build_status: string;
       input_delivery_status: string;
@@ -76,7 +82,7 @@ export default async function ExperimentDetailPage({ params }: { params: Promise
         </p>
         <form action={runNow}>
           <input type="hidden" name="id" value={id} />
-          <button type="submit">运行实验</button>
+          <SubmitButton pendingText="运行中...">运行实验</SubmitButton>
         </form>
       </section>
 
@@ -130,8 +136,8 @@ export default async function ExperimentDetailPage({ params }: { params: Promise
             {latestRunItems.rows.map((it, idx) => (
               <tr key={`${it.run_id}-${it.data_item_id}-${idx}`}>
                 <td>
-                  <div><code>{it.run_id.slice(0, 8)}</code></div>
-                  <div className="muted"><code>{it.data_item_id.slice(0, 8)}</code></div>
+                  <div><code>{it.run_id}</code></div>
+                  <div className="muted"><code>{it.data_item_id}</code></div>
                 </td>
                 <td>{it.environment_build_status}</td>
                 <td>{it.input_delivery_status}</td>

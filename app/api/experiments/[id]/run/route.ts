@@ -9,7 +9,11 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
   }
 
   try {
-    const { id } = await params;
+    const { id: idParam } = await params;
+    const id = Number(idParam.trim());
+    if (!Number.isInteger(id) || id <= 0) {
+      return NextResponse.json({ ok: false, error: "invalid id" }, { status: 400 });
+    }
     const result = await runExperiment(id, user.id);
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {
