@@ -207,6 +207,20 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
       [experiment.dataset_id]
     );
 
+    if (items.rows.length === 0) {
+      await tx.query(
+        `UPDATE experiments
+         SET status = 'ready',
+             run_locked = FALSE,
+             started_at = NULL,
+             finished_at = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND deleted_at IS NULL`,
+        [experimentId]
+      );
+      return { runCaseCount: 0 };
+    }
+
     for (const item of items.rows) {
       await runOneCase(tx as unknown as Tx, experiment, item, 1, evaluators);
     }

@@ -127,14 +127,28 @@ async function updateExperiment(formData: FormData) {
   }
 
   await withTransaction(async (tx) => {
+    const editable = await tx.query<{ id: number }>(
+      `SELECT e.id
+       FROM experiments e
+       JOIN datasets d ON d.id = $2 AND d.deleted_at IS NULL
+       JOIN agents a ON a.id = $3 AND a.deleted_at IS NULL
+       WHERE e.id = $1
+         AND e.deleted_at IS NULL
+         AND e.run_locked = FALSE
+       LIMIT 1`,
+      [id, datasetId, agentId]
+    );
+
+    if (editable.rowCount === 0) {
+      return;
+    }
+
     await tx.query(
       `UPDATE experiments
        SET name = $2, dataset_id = $3, agent_id = $4, status = $5, updated_by = $6, updated_at = CURRENT_TIMESTAMP
        WHERE id = $1
          AND deleted_at IS NULL
-         AND run_locked = FALSE
-         AND EXISTS (SELECT 1 FROM datasets d WHERE d.id = $3 AND d.deleted_at IS NULL)
-         AND EXISTS (SELECT 1 FROM agents a WHERE a.id = $4 AND a.deleted_at IS NULL)`,
+         AND run_locked = FALSE`,
       [id, name, datasetId, agentId, normalizedStatus, user.id]
     );
 
