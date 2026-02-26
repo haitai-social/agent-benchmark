@@ -366,7 +366,6 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     await dbQuery(
       `UPDATE experiments
        SET queue_message_id = $2,
-           queue_status = 'queued',
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $1 AND deleted_at IS NULL`,
       [dispatch.experiment.id, queueResult.messageId]
