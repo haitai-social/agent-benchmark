@@ -47,8 +47,9 @@ export type Experiment = {
   agent_id: number;
   agent_key: string;
   agent_version: string;
-  status: string;
-  run_locked: boolean;
+  queue_message_id: string | null;
+  queued_at: string | null;
+  queue_status: string;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;

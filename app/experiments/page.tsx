@@ -66,8 +66,8 @@ async function createExperiment(formData: FormData) {
     let experimentId = 0;
     if (engine === "mysql") {
       const inserted = await tx.query(
-        `INSERT INTO experiments (name, dataset_id, agent_id, status, run_locked, created_by, updated_by)
-         SELECT $1, $2, $3, 'ready', FALSE, $4, $4
+        `INSERT INTO experiments (name, dataset_id, agent_id, queue_status, created_by, updated_by)
+         SELECT $1, $2, $3, 'idle', $4, $4
          FROM datasets d
          JOIN agents a ON a.id = $3
          WHERE d.id = $2
@@ -78,8 +78,8 @@ async function createExperiment(formData: FormData) {
       experimentId = Number((inserted as { insertId?: number }).insertId ?? 0);
     } else {
       const inserted = await tx.query<{ id: number }>(
-        `INSERT INTO experiments (name, dataset_id, agent_id, status, run_locked, created_by, updated_by)
-         SELECT $1, $2, $3, 'ready', FALSE, $4, $4
+        `INSERT INTO experiments (name, dataset_id, agent_id, queue_status, created_by, updated_by)
+         SELECT $1, $2, $3, 'idle', $4, $4
          FROM datasets d
          JOIN agents a ON a.id = $3
          WHERE d.id = $2
@@ -113,9 +113,7 @@ async function updateExperiment(formData: FormData) {
   const datasetId = Number(datasetIdRaw);
   const agentIdRaw = String(formData.get("agentId") ?? "").trim();
   const agentId = Number(agentIdRaw);
-  const expStatus = String(formData.get("expStatus") ?? "ready").trim() || "ready";
   const evaluatorIds = parseEvaluatorIds(formData);
-  const normalizedStatus = ["ready", "running", "finished", "partial_failed", "failed"].includes(expStatus) ? expStatus : "ready";
 
   const q = String(formData.get("q") ?? "").trim();
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
@@ -134,7 +132,7 @@ async function updateExperiment(formData: FormData) {
        JOIN agents a ON a.id = $3 AND a.deleted_at IS NULL
        WHERE e.id = $1
          AND e.deleted_at IS NULL
-         AND e.run_locked = FALSE
+         AND e.queue_status = 'idle'
        LIMIT 1`,
       [id, datasetId, agentId]
     );
@@ -145,11 +143,11 @@ async function updateExperiment(formData: FormData) {
 
     await tx.query(
       `UPDATE experiments
-       SET name = $2, dataset_id = $3, agent_id = $4, status = $5, updated_by = $6, updated_at = CURRENT_TIMESTAMP
+       SET name = $2, dataset_id = $3, agent_id = $4, updated_by = $5, updated_at = CURRENT_TIMESTAMP
        WHERE id = $1
          AND deleted_at IS NULL
-         AND run_locked = FALSE`,
-      [id, name, datasetId, agentId, normalizedStatus, user.id]
+         AND queue_status = 'idle'`,
+      [id, name, datasetId, agentId, user.id]
     );
 
     await attachExperimentEvaluators(tx, id, evaluatorIds);
@@ -229,13 +227,14 @@ export default async function ExperimentsPage({
       agent_id: number;
       agent_key: string;
       agent_version: string;
-      status: string;
+      queue_status: string;
+      queue_message_id: string | null;
       created_at: string;
       evaluator_count: number | string;
     }>(
       `SELECT e.id, e.name, d.id AS dataset_id, d.name AS dataset_name,
               a.id AS agent_id, a.agent_key, a.version AS agent_version,
-              e.status, e.created_at,
+              e.queue_status, e.queue_message_id, e.created_at,
               COUNT(ee.id) AS evaluator_count
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
@@ -243,10 +242,10 @@ export default async function ExperimentsPage({
        LEFT JOIN experiment_evaluators ee ON ee.experiment_id = e.id
        WHERE ($1 = '' OR LOWER(e.name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(a.version) LIKE CONCAT('%', LOWER($4), '%'))
          AND e.deleted_at IS NULL
-         AND ($5 = 'all' OR e.status = $6)
+         AND ($5 = 'all' OR e.queue_status = $6)
          AND ($7 = '' OR LOWER(d.name) LIKE CONCAT('%', LOWER($8), '%'))
          AND ($9 = '' OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($10), '%'))
-       GROUP BY e.id, e.name, d.id, d.name, a.id, a.agent_key, a.version, e.status, e.created_at
+       GROUP BY e.id, e.name, d.id, d.name, a.id, a.agent_key, a.version, e.queue_status, e.queue_message_id, e.created_at
        ORDER BY e.created_at DESC`,
       [
         filters.q,
@@ -262,11 +261,11 @@ export default async function ExperimentsPage({
       ]
     ),
     Number.isInteger(editingId) && editingId > 0
-      ? dbQuery<{ id: number; name: string; dataset_id: number; agent_id: number; status: string; run_locked: boolean }>(
-          `SELECT id, name, dataset_id, agent_id, status, run_locked FROM experiments WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+      ? dbQuery<{ id: number; name: string; dataset_id: number; agent_id: number; queue_status: string }>(
+          `SELECT id, name, dataset_id, agent_id, queue_status FROM experiments WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
           [editingId]
         )
-      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; name: string; dataset_id: number; agent_id: number; status: string; run_locked: boolean }>; rowCount: number }),
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; name: string; dataset_id: number; agent_id: number; queue_status: string }>; rowCount: number }),
     Number.isInteger(editingId) && editingId > 0
       ? dbQuery<{ evaluator_id: number }>(`SELECT evaluator_id FROM experiment_evaluators WHERE experiment_id = $1`, [editingId])
       : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ evaluator_id: number }>; rowCount: number })
@@ -307,7 +306,7 @@ export default async function ExperimentsPage({
       {hasFilter ? (
         <section className="active-filters">
           <span className="muted">当前筛选:</span>
-          {filters.status !== "all" ? <span className="filter-pill">{`状态: ${filters.status}`}</span> : null}
+          {filters.status !== "all" ? <span className="filter-pill">{`MQ状态: ${filters.status}`}</span> : null}
           {filters.datasetLike ? <span className="filter-pill">{`Dataset: ${filters.datasetLike}`}</span> : null}
           {filters.agentLike ? <span className="filter-pill">{`Agent: ${filters.agentLike}`}</span> : null}
           <Link href={filters.q ? `/experiments?q=${encodeURIComponent(filters.q)}` : "/experiments"} className="text-btn">
@@ -333,7 +332,7 @@ export default async function ExperimentsPage({
               <th>评测集</th>
               <th>Agent</th>
               <th>Evaluators</th>
-              <th>状态</th>
+              <th>MQ状态</th>
               <th>创建时间</th>
               <th>操作</th>
             </tr>
@@ -352,7 +351,7 @@ export default async function ExperimentsPage({
                 </td>
                 <td>{Number(e.evaluator_count)}</td>
                 <td>
-                  <span className={`status-pill ${e.status}`}>{e.status}</span>
+                  <span className={`status-pill ${e.queue_status}`}>{e.queue_status}</span>
                 </td>
                 <td>{new Date(e.created_at).toLocaleString()}</td>
                 <td>
@@ -392,14 +391,13 @@ export default async function ExperimentsPage({
               <form action="/experiments" className="menu-form">
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="panel" value="none" />
-                <label className="field-label">状态</label>
+                <label className="field-label">MQ状态</label>
                 <div className="chip-row">
                   {[
                     { value: "all", label: "全部" },
-                    { value: "ready", label: "ready" },
-                    { value: "running", label: "running" },
-                    { value: "finished", label: "finished" },
-                    { value: "partial_failed", label: "partial_failed" },
+                    { value: "queued", label: "queued" },
+                    { value: "consuming", label: "consuming" },
+                    { value: "done", label: "done" },
                     { value: "failed", label: "failed" }
                   ].map((item) => (
                     <label key={item.value} className="chip">
@@ -485,14 +483,8 @@ export default async function ExperimentsPage({
                 })}
               </div>
             </FormField>
-            <FormField title="状态" typeLabel="Enum">
-              <select name="expStatus" defaultValue={editingRow?.status ?? "ready"} disabled={Boolean(editingRow?.run_locked)}>
-                {["ready", "running", "finished", "partial_failed", "failed"].map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
+            <FormField title="MQ状态" typeLabel="Enum">
+              <input value={editingRow?.queue_status ?? "idle"} readOnly disabled />
             </FormField>
           </form>
           <div className="drawer-actions">

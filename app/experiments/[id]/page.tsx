@@ -72,8 +72,9 @@ export default async function ExperimentDetailPage({
       agent_key: string;
       agent_version: string;
       docker_image: string;
-      status: string;
-      run_locked: boolean;
+      queue_status: string;
+      queue_message_id: string | null;
+      queued_at: string | null;
       started_at: string | null;
       finished_at: string | null;
       created_at: string;
@@ -81,7 +82,7 @@ export default async function ExperimentDetailPage({
     }>(
       `SELECT e.id, e.name, e.dataset_id, d.name AS dataset_name,
               e.agent_id, a.agent_key, a.version AS agent_version, a.docker_image,
-              e.status, e.run_locked, e.started_at, e.finished_at,
+              e.queue_status, e.queue_message_id, e.queued_at, e.started_at, e.finished_at,
               e.created_at, e.updated_at
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
@@ -260,7 +261,7 @@ export default async function ExperimentDetailPage({
               <ArrowLeftIcon width={16} height={16} />
             </Link>
             <h1>{e.name}</h1>
-            <span className={`status-pill ${e.status}`}>{e.status}</span>
+            <span className={`status-pill ${e.queue_status}`}>{e.queue_status}</span>
           </div>
           <div className="exp-kpi-chip-row">
             <span className="exp-kpi-chip">总条数 {totalCount}</span>
@@ -271,7 +272,11 @@ export default async function ExperimentDetailPage({
           </div>
         </div>
         <div className="exp-header-actions">
-          <DevToastButton label="启动实验" />
+          <DevToastButton
+            experimentId={id}
+            label="启动实验"
+            blockedReason={e.queue_status !== "idle" ? "实验已启动过，请使用“重试失败”继续执行失败项" : null}
+          />
           <form action={retryFailed}>
             <input type="hidden" name="id" value={id} />
             <SubmitButton className="ghost-btn" pendingText="重试中..." disabled={!hasFailedCases}>
@@ -462,6 +467,9 @@ export default async function ExperimentDetailPage({
             </p>
             <p className="muted">开始时间: {e.started_at ? new Date(e.started_at).toLocaleString() : "-"}</p>
             <p className="muted">结束时间: {e.finished_at ? new Date(e.finished_at).toLocaleString() : "-"}</p>
+            <p className="muted">MQ状态: {e.queue_status}</p>
+            <p className="muted">入队时间: {e.queued_at ? new Date(e.queued_at).toLocaleString() : "-"}</p>
+            <p className="muted">消息ID: {e.queue_message_id ?? "-"}</p>
           </section>
         </section>
       ) : null}

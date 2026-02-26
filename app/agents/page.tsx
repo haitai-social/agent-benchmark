@@ -178,8 +178,7 @@ async function deleteAgent(formData: FormData) {
      SET is_deleted = TRUE,
          deleted_at = CURRENT_TIMESTAMP,
          updated_by = $2,
-         updated_at = CURRENT_TIMESTAMP,
-         status = 'archived'
+         updated_at = CURRENT_TIMESTAMP
      WHERE agent_id = $1 AND deleted_at IS NULL`,
     [id, user.id]
   );
