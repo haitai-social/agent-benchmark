@@ -12,6 +12,7 @@ import {
   SearchIcon,
   TraceIcon
 } from "../components/icons";
+import { SubmitButton } from "../components/submit-button";
 
 function buildListHref(q: string, service: string, extras?: Record<string, string>) {
   const params = new URLSearchParams();
@@ -59,7 +60,8 @@ async function updateTrace(formData: FormData) {
   "use server";
   await requireUser();
 
-  const id = String(formData.get("id") ?? "").trim();
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
   const traceId = String(formData.get("traceId") ?? "").trim();
   const spanId = String(formData.get("spanId") ?? "").trim();
   const parentSpanId = String(formData.get("parentSpanId") ?? "").trim();
@@ -73,7 +75,7 @@ async function updateTrace(formData: FormData) {
   const q = String(formData.get("q") ?? "").trim();
   const service = String(formData.get("service") ?? "all").trim() || "all";
 
-  if (!id || !name) return;
+  if (!idRaw || !Number.isInteger(id) || id <= 0 || !name) return;
 
   const startTime = startTimeRaw ? new Date(startTimeRaw).toISOString() : null;
   const endTime = endTimeRaw ? new Date(endTimeRaw).toISOString() : null;
@@ -114,10 +116,11 @@ async function deleteTrace(formData: FormData) {
   "use server";
   await requireUser();
 
-  const id = String(formData.get("id") ?? "").trim();
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
   const q = String(formData.get("q") ?? "").trim();
   const service = String(formData.get("service") ?? "all").trim() || "all";
-  if (!id) return;
+  if (!idRaw || !Number.isInteger(id) || id <= 0) return;
 
   await dbQuery(`DELETE FROM traces WHERE id = $1`, [id]);
 
@@ -135,7 +138,8 @@ export default async function TracesPage({
   const { q = "", service = "all", panel = "none", id = "", result = "", inserted = "", message = "" } = await searchParams;
   const qv = q.trim();
   const ingesting = panel === "ingest";
-  const detailId = id.trim();
+  const detailIdRaw = id.trim();
+  const detailId = detailIdRaw ? Number(detailIdRaw) : 0;
   const listHref = buildListHref(qv, service);
   const ingestHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=ingest`;
 
@@ -159,7 +163,7 @@ export default async function TracesPage({
     dbQuery<{ service_name: string }>(
       `SELECT COALESCE(service_name, '-') AS service_name FROM traces GROUP BY COALESCE(service_name, '-') ORDER BY service_name ASC`
     ),
-    detailId
+    Number.isInteger(detailId) && detailId > 0
       ? dbQuery<{
           id: number;
           trace_id: string | null;
@@ -272,9 +276,9 @@ export default async function TracesPage({
                       <input type="hidden" name="id" value={row.id} />
                       <input type="hidden" name="q" value={qv} />
                       <input type="hidden" name="service" value={service} />
-                      <button type="submit" className="text-btn danger">
+                      <SubmitButton className="text-btn danger" pendingText="删除中...">
                         删除
-                      </button>
+                      </SubmitButton>
                     </form>
                   </div>
                 </td>
@@ -320,15 +324,15 @@ export default async function TracesPage({
                 <textarea name="attributes" defaultValue={JSON.stringify(editing.attributes, null, 2)} />
                 <label className="field-label">Raw JSON</label>
                 <textarea name="raw" defaultValue={JSON.stringify(editing.raw, null, 2)} />
-                <button type="submit">更新</button>
+                <SubmitButton pendingText="更新中...">更新</SubmitButton>
               </form>
               <form action={deleteTrace} className="menu-form">
                 <input type="hidden" name="id" value={editing.id} />
                 <input type="hidden" name="q" value={qv} />
                 <input type="hidden" name="service" value={service} />
-                <button type="submit" className="text-btn danger">
+                <SubmitButton className="text-btn danger" pendingText="删除中...">
                   删除
-                </button>
+                </SubmitButton>
               </form>
             </div>
           </aside>
@@ -384,7 +388,7 @@ export default async function TracesPage({
                     2
                   )}
                 />
-                <button type="submit">写入 Trace</button>
+                <SubmitButton pendingText="写入中...">写入 Trace</SubmitButton>
               </form>
             </div>
           </aside>

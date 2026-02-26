@@ -33,6 +33,14 @@ function ensureEnv(name: string) {
 
 let pgPool: PgPool | null = null;
 let mySqlPool: MySqlPool | null = null;
+let mySqlPoolRecyclePromise: Promise<void> | null = null;
+const MYSQL_RETRYABLE_ERROR_CODES = new Set([
+  "ETIMEDOUT",
+  "PROTOCOL_CONNECTION_LOST",
+  "PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR",
+  "ECONNRESET",
+  "EPIPE"
+]);
 
 function getPgPool() {
   if (!pgPool) {
@@ -56,10 +64,37 @@ function getMySqlPool() {
       database: ensureEnv("MYSQL_DB"),
       waitForConnections: true,
       connectionLimit: 10,
-      namedPlaceholders: false
+      namedPlaceholders: false,
+      connectTimeout: Number(process.env.MYSQL_CONNECT_TIMEOUT_MS ?? "10000"),
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0
     });
   }
   return mySqlPool;
+}
+
+async function resetMySqlPool() {
+  if (mySqlPoolRecyclePromise) {
+    await mySqlPoolRecyclePromise;
+    return;
+  }
+  const stalePool = mySqlPool;
+  mySqlPool = null;
+  if (!stalePool) return;
+
+  mySqlPoolRecyclePromise = (async () => {
+    try {
+      await stalePool.end();
+    } catch {
+      // no-op: stale pool can already be broken/closed
+    }
+  })();
+
+  try {
+    await mySqlPoolRecyclePromise;
+  } finally {
+    mySqlPoolRecyclePromise = null;
+  }
 }
 
 function toMySqlQuery(text: string, params: unknown[] = []) {
@@ -116,13 +151,35 @@ async function runMySqlQuery<T extends QueryResultRow = QueryResultRow>(
   };
 }
 
+function isRetryableMySqlError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const maybeCode = (error as { code?: unknown }).code;
+  if (typeof maybeCode === "string" && MYSQL_RETRYABLE_ERROR_CODES.has(maybeCode)) {
+    return true;
+  }
+  const maybeMessage = (error as { message?: unknown }).message;
+  return typeof maybeMessage === "string" && maybeMessage.toLowerCase().includes("pool is closed");
+}
+
 async function executeQuery<T extends QueryResultRow = QueryResultRow>(
   text: string,
   params?: unknown[],
   executor?: PgPool | PgClient | MySqlPool | MySqlPoolConnection
 ): Promise<DbResult<T>> {
   if (dbEngine === "mysql") {
-    return runMySqlQuery<T>((executor as MySqlPool | MySqlPoolConnection | undefined) ?? getMySqlPool(), text, params);
+    const activeExecutor = (executor as MySqlPool | MySqlPoolConnection | undefined) ?? getMySqlPool();
+    try {
+      return await runMySqlQuery<T>(activeExecutor, text, params);
+    } catch (error) {
+      // Retry once for transient network failures for non-transactional queries.
+      if (!executor && isRetryableMySqlError(error)) {
+        await resetMySqlPool();
+        return runMySqlQuery<T>(getMySqlPool(), text, params);
+      }
+      throw error;
+    }
   }
 
   return runPgQuery<T>((executor as PgPool | PgClient | undefined) ?? getPgPool(), text, params);

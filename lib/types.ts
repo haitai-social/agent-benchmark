@@ -1,14 +1,13 @@
 export type Dataset = {
-  id: string;
+  id: number;
   name: string;
   description: string;
   created_at: string;
 };
 
 export type DataItem = {
-  id: string;
-  dataset_id: string;
-  name: string;
+  id: number;
+  dataset_id: number;
   environment_snapshot: Record<string, unknown>;
   user_input: string;
   agent_trajectory: unknown | null;
@@ -17,7 +16,7 @@ export type DataItem = {
 };
 
 export type Evaluator = {
-  id: string;
+  id: number;
   evaluator_key: string;
   name: string;
   prompt_template: string;
@@ -26,9 +25,9 @@ export type Evaluator = {
 };
 
 export type Experiment = {
-  id: string;
+  id: number;
   name: string;
-  dataset_id: string;
+  dataset_id: number;
   dataset_name: string;
   agent_version: string;
   status: string;
@@ -36,8 +35,8 @@ export type Experiment = {
 };
 
 export type ExperimentRun = {
-  id: string;
-  experiment_id: string;
+  id: number;
+  experiment_id: number;
   status: string;
   started_at: string;
   finished_at: string | null;

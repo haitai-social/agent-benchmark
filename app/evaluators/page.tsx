@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
 import { requireUser } from "@/lib/supabase-auth";
 import { FilterIcon, JudgeIcon, PlusIcon, RefreshIcon, SearchIcon } from "../components/icons";
+import { SubmitButton } from "../components/submit-button";
 
 async function createEvaluator(formData: FormData) {
   "use server";
@@ -33,7 +34,8 @@ async function updateEvaluator(formData: FormData) {
   "use server";
   const user = await requireUser();
 
-  const id = String(formData.get("id") ?? "");
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
   const evaluatorKey = String(formData.get("evaluatorKey") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const promptTemplate = String(formData.get("promptTemplate") ?? "").trim();
@@ -41,7 +43,7 @@ async function updateEvaluator(formData: FormData) {
   const modelName = String(formData.get("modelName") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
 
-  if (!id || !evaluatorKey || !name || !promptTemplate || !baseUrl || !modelName) return;
+  if (!idRaw || !Number.isInteger(id) || id <= 0 || !evaluatorKey || !name || !promptTemplate || !baseUrl || !modelName) return;
 
   await dbQuery(
     `UPDATE evaluators
@@ -58,9 +60,10 @@ async function deleteEvaluator(formData: FormData) {
   "use server";
   await requireUser();
 
-  const id = String(formData.get("id") ?? "");
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const id = Number(idRaw);
   const q = String(formData.get("q") ?? "").trim();
-  if (!id) return;
+  if (!idRaw || !Number.isInteger(id) || id <= 0) return;
   await dbQuery(`DELETE FROM evaluators WHERE id = $1`, [id]);
   revalidatePath("/evaluators");
   redirect(q ? `/evaluators?q=${encodeURIComponent(q)}` : "/evaluators");
@@ -76,10 +79,11 @@ export default async function EvaluatorsPage({
   const { q = "", panel = "none", id = "" } = await searchParams;
   const filters = { q: q.trim() };
   const creating = panel === "create";
-  const editingId = id.trim();
+  const parsedId = id.trim() ? Number(id.trim()) : 0;
+  const editingId = Number.isInteger(parsedId) && parsedId > 0 ? parsedId : 0;
 
   const { rows } = await dbQuery<{
-    id: string;
+    id: number;
     evaluator_key: string;
     name: string;
     prompt_template: string;
@@ -97,7 +101,7 @@ export default async function EvaluatorsPage({
   if (filters.q) listParams.set("q", filters.q);
   const listHref = listParams.size > 0 ? `/evaluators?${listParams.toString()}` : "/evaluators";
   const createHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=create`;
-  const editing = rows.find((row) => row.id === editingId);
+  const editing = editingId ? rows.find((row) => row.id === editingId) : undefined;
   const showDrawer = creating || Boolean(editing);
 
   return (
@@ -180,9 +184,9 @@ export default async function EvaluatorsPage({
                     <form action={deleteEvaluator}>
                       <input type="hidden" name="id" value={row.id} />
                       <input type="hidden" name="q" value={filters.q} />
-                      <button type="submit" className="text-btn danger">
+                      <SubmitButton className="text-btn danger" pendingText="删除中...">
                         删除
-                      </button>
+                      </SubmitButton>
                     </form>
                   </div>
                 </td>
@@ -237,15 +241,15 @@ export default async function EvaluatorsPage({
                   required
                   defaultValue={editing?.prompt_template ?? ""}
                 />
-                <button type="submit">{editing ? "更新" : "创建"}</button>
+                <SubmitButton pendingText={editing ? "更新中..." : "创建中..."}>{editing ? "更新" : "创建"}</SubmitButton>
               </form>
               {editing ? (
                 <form action={deleteEvaluator} className="menu-form">
                   <input type="hidden" name="id" value={editing.id} />
                   <input type="hidden" name="q" value={filters.q} />
-                  <button type="submit" className="text-btn danger">
+                  <SubmitButton type="submit" className="text-btn danger" pendingText="删除中...">
                     删除
-                  </button>
+                  </SubmitButton>
                 </form>
               ) : null}
             </div>

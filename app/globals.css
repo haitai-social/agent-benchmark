@@ -1555,7 +1555,37 @@ button {
 
 button:hover {
   background: #111827;
-  filter: none;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.78;
+}
+
+button:disabled:hover {
+  background: inherit;
+}
+
+.text-btn:disabled {
+  background: transparent;
+  border-color: transparent;
+}
+
+.submit-btn-inner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 68px;
+}
+
+.submit-btn-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: spin 0.72s linear infinite;
 }
 
 table {
@@ -1596,6 +1626,12 @@ th {
   to {
     opacity: 1;
     transform: translateX(0);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

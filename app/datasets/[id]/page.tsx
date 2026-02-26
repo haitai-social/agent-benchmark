@@ -13,20 +13,22 @@ import {
   TraceIcon,
   UserIcon
 } from "@/app/components/icons";
+import { SubmitButton } from "@/app/components/submit-button";
 
 async function createItem(formData: FormData) {
   "use server";
   const user = await requireUser();
 
-  const datasetId = String(formData.get("datasetId") ?? "");
-  const name = String(formData.get("name") ?? "").trim();
-  const snapshotId = String(formData.get("snapshotId") ?? "").trim();
+  const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
+  const snapshotIdRaw = String(formData.get("snapshotId") ?? "").trim();
+  const datasetId = Number(datasetIdRaw);
+  const snapshotId = Number(snapshotIdRaw);
   const userInput = String(formData.get("userInput") ?? "").trim();
   const traceId = String(formData.get("traceId") ?? "").trim();
   const agentOutput = String(formData.get("agentOutput") ?? "{}");
   const q = String(formData.get("q") ?? "").trim();
 
-  if (!datasetId || !name || !userInput || !snapshotId) return;
+  if (!datasetIdRaw || !snapshotIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !userInput || !Number.isInteger(snapshotId) || snapshotId <= 0) return;
 
   let finalTrajectory: unknown = null;
   if (traceId) {
@@ -42,11 +44,10 @@ async function createItem(formData: FormData) {
 
   await dbQuery(
     `INSERT INTO data_items (
-      dataset_id, name, environment_snapshot, user_input, agent_trajectory, agent_output, trace_id, snapshot_id, created_by, updated_by, updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,CURRENT_TIMESTAMP)`,
+      dataset_id, environment_snapshot, user_input, agent_trajectory, agent_output, trace_id, snapshot_id, created_by, updated_by, updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,CURRENT_TIMESTAMP)`,
     [
       datasetId,
-      name,
       JSON.stringify(finalEnvironmentSnapshot),
       userInput,
       JSON.stringify(finalTrajectory),
@@ -69,9 +70,11 @@ async function deleteItem(formData: FormData) {
   "use server";
   const user = await requireUser();
 
-  const id = String(formData.get("id") ?? "");
-  const datasetId = String(formData.get("datasetId") ?? "");
-  if (!id) return;
+  const idRaw = String(formData.get("id") ?? "").trim();
+  const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
+  const id = Number(idRaw);
+  const datasetId = Number(datasetIdRaw);
+  if (!idRaw || !datasetIdRaw || !Number.isInteger(id) || id <= 0 || !Number.isInteger(datasetId) || datasetId <= 0) return;
   await dbQuery(`DELETE FROM data_items WHERE id = $1`, [id]);
   await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1`, [datasetId, user.id]);
   revalidatePath(`/datasets/${datasetId}`);
@@ -82,16 +85,18 @@ async function updateItem(formData: FormData) {
   "use server";
   const user = await requireUser();
 
-  const datasetId = String(formData.get("datasetId") ?? "");
-  const itemId = String(formData.get("itemId") ?? "");
-  const name = String(formData.get("name") ?? "").trim();
-  const snapshotId = String(formData.get("snapshotId") ?? "").trim();
+  const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
+  const itemIdRaw = String(formData.get("itemId") ?? "").trim();
+  const snapshotIdRaw = String(formData.get("snapshotId") ?? "").trim();
+  const datasetId = Number(datasetIdRaw);
+  const itemId = Number(itemIdRaw);
+  const snapshotId = Number(snapshotIdRaw);
   const userInput = String(formData.get("userInput") ?? "").trim();
   const traceId = String(formData.get("traceId") ?? "").trim();
   const agentOutput = String(formData.get("agentOutput") ?? "{}");
   const q = String(formData.get("q") ?? "").trim();
 
-  if (!datasetId || !itemId || !name || !userInput || !snapshotId) return;
+  if (!datasetIdRaw || !itemIdRaw || !snapshotIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(itemId) || itemId <= 0 || !userInput || !Number.isInteger(snapshotId) || snapshotId <= 0) return;
 
   let finalTrajectory: unknown = null;
   if (traceId) {
@@ -107,20 +112,18 @@ async function updateItem(formData: FormData) {
 
   await dbQuery(
     `UPDATE data_items
-     SET name = $3,
-         environment_snapshot = $4,
-         user_input = $5,
-         agent_trajectory = $6,
-         agent_output = $7,
-         trace_id = $8,
-         snapshot_id = $9,
-         updated_by = $10,
+     SET environment_snapshot = $3,
+         user_input = $4,
+         agent_trajectory = $5,
+         agent_output = $6,
+         trace_id = $7,
+         snapshot_id = $8,
+         updated_by = $9,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND dataset_id = $2`,
     [
       itemId,
       datasetId,
-      name,
       JSON.stringify(finalEnvironmentSnapshot),
       userInput,
       JSON.stringify(finalTrajectory),
@@ -148,14 +151,19 @@ export default async function DatasetDetailPage({
 }) {
   await requireUser();
 
-  const { id } = await params;
+  const { id: idParam } = await params;
+  const id = Number(idParam.trim());
   const { q = "", add = "0", edit = "" } = await searchParams;
   const qv = q.trim();
   const adding = add === "1";
-  const editId = edit.trim();
+  const editId = edit.trim() ? Number(edit.trim()) : 0;
+
+  if (!Number.isInteger(id) || id <= 0) {
+    return <section className="card">评测集不存在</section>;
+  }
 
   const ds = await dbQuery<{
-    id: string;
+    id: number;
     name: string;
     description: string;
     created_at: string;
@@ -172,26 +180,25 @@ export default async function DatasetDetailPage({
 
   const [items, traceIds, snapshotPresets] = await Promise.all([
     dbQuery<{
-      id: string;
-      name: string;
+      id: number;
       user_input: string;
       trace_id: string | null;
-      snapshot_id: string | null;
+      snapshot_id: number | null;
       agent_trajectory: unknown;
       agent_output: unknown;
       updated_at: string;
       created_at: string;
     }>(
-      `SELECT id, name, user_input, trace_id, snapshot_id, agent_trajectory, agent_output, updated_at, created_at
+      `SELECT id, user_input, trace_id, snapshot_id, agent_trajectory, agent_output, updated_at, created_at
        FROM data_items
-       WHERE dataset_id = $1 AND ($2 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(user_input) LIKE CONCAT('%', LOWER($4), '%'))
+       WHERE dataset_id = $1 AND ($2 = '' OR LOWER(user_input) LIKE CONCAT('%', LOWER($3), '%'))
        ORDER BY updated_at DESC`,
-      [id, qv, qv, qv]
+      [id, qv, qv]
     ),
     dbQuery<{ trace_id: string }>(
       `SELECT trace_id FROM traces WHERE trace_id IS NOT NULL AND trace_id <> '' GROUP BY trace_id ORDER BY MAX(id) DESC LIMIT 200`
     ),
-    dbQuery<{ id: string; name: string }>(
+    dbQuery<{ id: number; name: string }>(
       `SELECT id, name FROM snapshot_presets ORDER BY created_at ASC`
     )
   ]);
@@ -272,7 +279,7 @@ export default async function DatasetDetailPage({
                 {items.rows.map((item) => (
                   <tr key={item.id}>
                     <td>
-                      <code>{item.id.slice(0, 8)}</code>
+                      <code>{item.id}</code>
                     </td>
                     <td className="muted">{item.user_input.slice(0, 80)}</td>
                     <td className="muted">{JSON.stringify(item.agent_output).slice(0, 90)}...</td>
@@ -297,9 +304,9 @@ export default async function DatasetDetailPage({
                         <form action={deleteItem}>
                           <input type="hidden" name="id" value={item.id} />
                           <input type="hidden" name="datasetId" value={id} />
-                          <button type="submit" className="text-btn danger">
+                          <SubmitButton className="text-btn danger" pendingText="删除中...">
                             删除
-                          </button>
+                          </SubmitButton>
                         </form>
                       </div>
                     </td>
@@ -332,13 +339,6 @@ export default async function DatasetDetailPage({
                   <input type="hidden" name="datasetId" value={id} />
                   <input type="hidden" name="q" value={qv} />
                   {editingItem ? <input type="hidden" name="itemId" value={editingItem.id} /> : null}
-
-                  <div className="field-group">
-                    <label className="field-head">
-                      <span className="field-title">数据项名称</span>
-                    </label>
-                    <input name="name" placeholder="例如：日程规划评测-1" required defaultValue={editingItem?.name ?? ""} />
-                  </div>
 
                   <div className="field-group">
                     <label className="field-head">
@@ -404,16 +404,16 @@ export default async function DatasetDetailPage({
                       </option>
                       {snapshotPresets.rows.map((s) => (
                         <option key={s.id} value={s.id}>
-                          {s.name} ({s.id.slice(0, 8)})
+                          {s.name} ({s.id})
                         </option>
                       ))}
                     </select>
                   </div>
 
                   <div className="drawer-actions">
-                    <button type="submit" className="primary-btn">
+                    <SubmitButton className="primary-btn" pendingText={editingItem ? "更新中..." : "添加中..."}>
                       {editingItem ? "更新" : "添加"}
-                    </button>
+                    </SubmitButton>
                     <Link href={baseHref} className="ghost-btn">
                       取消
                     </Link>
