@@ -91,8 +91,9 @@ CREATE TABLE IF NOT EXISTS experiments (
   name VARCHAR(255) NOT NULL,
   dataset_id BIGINT UNSIGNED NOT NULL,
   agent_id BIGINT UNSIGNED NOT NULL,
-  status VARCHAR(100) NOT NULL DEFAULT 'ready',
-  run_locked TINYINT(1) NOT NULL DEFAULT 0,
+  queue_message_id VARCHAR(128) DEFAULT NULL,
+  queued_at TIMESTAMP NULL DEFAULT NULL,
+  queue_status VARCHAR(64) NOT NULL DEFAULT 'idle',
   started_at TIMESTAMP NULL DEFAULT NULL,
   finished_at TIMESTAMP NULL DEFAULT NULL,
   created_by VARCHAR(255) NOT NULL,
@@ -105,8 +106,75 @@ CREATE TABLE IF NOT EXISTS experiments (
     FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE RESTRICT,
   CONSTRAINT fk_experiments_agent
     FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE RESTRICT,
-  INDEX idx_experiments_is_deleted (is_deleted)
+  INDEX idx_experiments_is_deleted (is_deleted),
+  INDEX idx_experiments_queue_status (queue_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @exp_has_queue_message_id := (
+  SELECT COUNT(*)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'queue_message_id'
+);
+SET @exp_sql := IF(@exp_has_queue_message_id = 0, 'ALTER TABLE experiments ADD COLUMN queue_message_id VARCHAR(128) NULL AFTER agent_id', 'SELECT 1');
+PREPARE exp_stmt FROM @exp_sql;
+EXECUTE exp_stmt;
+DEALLOCATE PREPARE exp_stmt;
+
+SET @exp_has_queued_at := (
+  SELECT COUNT(*)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'queued_at'
+);
+SET @exp_sql := IF(@exp_has_queued_at = 0, 'ALTER TABLE experiments ADD COLUMN queued_at TIMESTAMP NULL DEFAULT NULL AFTER queue_message_id', 'SELECT 1');
+PREPARE exp_stmt FROM @exp_sql;
+EXECUTE exp_stmt;
+DEALLOCATE PREPARE exp_stmt;
+
+SET @exp_has_queue_status := (
+  SELECT COUNT(*)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'queue_status'
+);
+SET @exp_sql := IF(@exp_has_queue_status = 0, 'ALTER TABLE experiments ADD COLUMN queue_status VARCHAR(64) NOT NULL DEFAULT ''idle'' AFTER queued_at', 'SELECT 1');
+PREPARE exp_stmt FROM @exp_sql;
+EXECUTE exp_stmt;
+DEALLOCATE PREPARE exp_stmt;
+
+SET @exp_has_status := (
+  SELECT COUNT(*)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'status'
+);
+SET @exp_sql := IF(
+  @exp_has_status = 1,
+  'UPDATE experiments
+   SET queue_status = CASE
+     WHEN status = ''queued'' THEN ''queued''
+     WHEN status = ''running'' THEN ''consuming''
+     WHEN status IN (''finished'', ''partial_failed'') THEN ''done''
+     WHEN status = ''failed'' THEN ''failed''
+     ELSE ''idle''
+   END',
+  'SELECT 1'
+);
+PREPARE exp_stmt FROM @exp_sql;
+EXECUTE exp_stmt;
+DEALLOCATE PREPARE exp_stmt;
+
+SET @exp_sql := IF(@exp_has_status = 1, 'ALTER TABLE experiments DROP COLUMN status', 'SELECT 1');
+PREPARE exp_stmt FROM @exp_sql;
+EXECUTE exp_stmt;
+DEALLOCATE PREPARE exp_stmt;
+
+SET @exp_has_run_locked := (
+  SELECT COUNT(*)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'run_locked'
+);
+SET @exp_sql := IF(@exp_has_run_locked = 1, 'ALTER TABLE experiments DROP COLUMN run_locked', 'SELECT 1');
+PREPARE exp_stmt FROM @exp_sql;
+EXECUTE exp_stmt;
+DEALLOCATE PREPARE exp_stmt;
 
 CREATE TABLE IF NOT EXISTS experiment_evaluators (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

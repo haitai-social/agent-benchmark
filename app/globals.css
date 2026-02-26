@@ -2233,6 +2233,11 @@ code {
   box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.18);
 }
 
+.dev-toast-dot.error {
+  background: #ef4444;
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.18);
+}
+
 @keyframes dev-toast-in {
   from {
     opacity: 0;

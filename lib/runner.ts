@@ -1,5 +1,6 @@
 import { dbQuery, engine, withTransaction } from "./db";
 import { listEvaluatorsForExperiment, scoreByEvaluatorList } from "./judges";
+import { publishExperimentRunRequested } from "./rabbitmq";
 
 type ExperimentContext = {
   id: number;
@@ -8,15 +9,59 @@ type ExperimentContext = {
   agent_key: string;
   agent_version: string;
   docker_image: string;
-  run_locked: boolean;
+  queue_status: string;
 };
 
-type DataItemForRun = {
+type RunCaseInput = {
   id: number;
   user_input: string;
   reference_trajectory: unknown;
   reference_output: unknown;
 };
+
+type DataItemForRun = RunCaseInput & {
+  session_jsonl: string;
+  trace_id: string | null;
+};
+
+type ExperimentDispatchReady = {
+  kind: "ready";
+  runCaseCount: number;
+  experiment: {
+    id: number;
+  };
+  dataset: {
+    id: number;
+    name: string;
+  };
+  agent: {
+    id: number;
+    name: string;
+    agent_key: string;
+    version: string;
+    docker_image: string;
+    openapi_spec: unknown;
+    metadata: unknown;
+  };
+  evaluators: Array<{ id: number; evaluator_key: string; name: string; prompt_template: string; base_url: string; model_name: string }>;
+  runCases: Array<{
+    run_case_id: number;
+    data_item_id: number;
+    attempt_no: number;
+    session_jsonl: string;
+    user_input: string;
+    trace_id: string | null;
+    reference_trajectory: unknown;
+    reference_output: unknown;
+  }>;
+};
+
+type ExperimentDispatchEmpty = {
+  kind: "empty";
+  runCaseCount: 0;
+};
+
+type ExperimentDispatchResult = ExperimentDispatchReady | ExperimentDispatchEmpty;
 
 function asCount(value: unknown) {
   return Number(value ?? 0);
@@ -61,37 +106,37 @@ async function updateExperimentStatus(tx: Tx, experimentId: number) {
   const success = asCount(counts?.success_count);
   const failed = asCount(counts?.failed_count);
 
-  let nextStatus = "ready";
+  let nextQueueStatus = "idle";
   let nextFinishedAtSql = "NULL";
   if (total === 0) {
-    nextStatus = "ready";
+    nextQueueStatus = "idle";
   } else if (running > 0 || pending > 0) {
-    nextStatus = "running";
+    nextQueueStatus = "consuming";
   } else if (failed === 0) {
-    nextStatus = "finished";
+    nextQueueStatus = "done";
     nextFinishedAtSql = "CURRENT_TIMESTAMP";
   } else if (success === 0) {
-    nextStatus = "failed";
+    nextQueueStatus = "failed";
     nextFinishedAtSql = "CURRENT_TIMESTAMP";
   } else {
-    nextStatus = "partial_failed";
+    nextQueueStatus = "done";
     nextFinishedAtSql = "CURRENT_TIMESTAMP";
   }
 
   await tx.query(
     `UPDATE experiments
-     SET status = $2,
+     SET queue_status = $2,
          finished_at = ${nextFinishedAtSql},
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND deleted_at IS NULL`,
-    [experimentId, nextStatus]
+    [experimentId, nextQueueStatus]
   );
 }
 
 async function runOneCase(
   tx: Tx,
   experiment: ExperimentContext,
-  item: DataItemForRun,
+  item: RunCaseInput,
   attemptNo: number,
   evaluators: Array<{ id: number; evaluator_key: string; name: string; prompt_template: string; base_url: string; model_name: string }>
 ) {
@@ -168,9 +213,9 @@ async function runOneCase(
 }
 
 export async function runExperiment(experimentId: number, _triggeredBy: string) {
-  return withTransaction(async (tx) => {
+  const dispatch: ExperimentDispatchResult = await withTransaction(async (tx) => {
     const exp = await tx.query<ExperimentContext>(
-      `SELECT e.id, e.dataset_id, e.agent_id, e.run_locked, a.agent_key, a.version AS agent_version, a.docker_image
+      `SELECT e.id, e.dataset_id, e.agent_id, e.queue_status, a.agent_key, a.version AS agent_version, a.docker_image
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
        JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
@@ -183,7 +228,7 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     }
 
     const experiment = exp.rows[0];
-    if (experiment.run_locked) {
+    if (experiment.queue_status !== "idle") {
       throw new Error("Experiment already started; use retry failed.");
     }
 
@@ -194,13 +239,36 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
 
     await tx.query(
       `UPDATE experiments
-       SET status = 'running', run_locked = TRUE, started_at = CURRENT_TIMESTAMP, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
+       SET queue_status = 'queued',
+           queued_at = CURRENT_TIMESTAMP,
+           queue_message_id = NULL,
+           started_at = NULL,
+           finished_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
        WHERE id = $1 AND deleted_at IS NULL`,
       [experimentId]
     );
 
+    const datasetRow = await tx.query<{ id: number; name: string }>(
+      `SELECT id, name FROM datasets WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+      [experiment.dataset_id]
+    );
+    const dataset = datasetRow.rows[0];
+    if (!dataset) {
+      throw new Error("Dataset not found");
+    }
+
+    const agentRow = await tx.query<{ id: number; name: string; openapi_spec: unknown; metadata: unknown }>(
+      `SELECT id, name, openapi_spec, metadata FROM agents WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+      [experiment.agent_id]
+    );
+    const agent = agentRow.rows[0];
+    if (!agent) {
+      throw new Error("Agent not found");
+    }
+
     const items = await tx.query<DataItemForRun>(
-      `SELECT id, user_input, reference_trajectory, reference_output
+      `SELECT id, session_jsonl, user_input, trace_id, reference_trajectory, reference_output
        FROM data_items
        WHERE dataset_id = $1 AND deleted_at IS NULL
        ORDER BY created_at ASC`,
@@ -210,31 +278,124 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     if (items.rows.length === 0) {
       await tx.query(
         `UPDATE experiments
-         SET status = 'ready',
-             run_locked = FALSE,
+         SET queue_status = 'idle',
+             queue_message_id = NULL,
+             queued_at = NULL,
              started_at = NULL,
              finished_at = NULL,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $1 AND deleted_at IS NULL`,
         [experimentId]
       );
-      return { runCaseCount: 0 };
+      return { kind: "empty", runCaseCount: 0 };
     }
+
+    const runCases: Array<{
+      run_case_id: number;
+      data_item_id: number;
+      attempt_no: number;
+      session_jsonl: string;
+      user_input: string;
+      trace_id: string | null;
+      reference_trajectory: unknown;
+      reference_output: unknown;
+    }> = [];
 
     for (const item of items.rows) {
-      await runOneCase(tx as unknown as Tx, experiment, item, 1, evaluators);
+      const runCaseId = await insertAndGetId(
+        tx as unknown as Tx,
+        `INSERT INTO run_cases (
+          experiment_id, data_item_id, agent_id, attempt_no, is_latest, status,
+          created_at, updated_at
+        ) VALUES ($1, $2, $3, 1, TRUE, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [experiment.id, item.id, experiment.agent_id]
+      );
+      if (!runCaseId) {
+        throw new Error(`Failed to create run_case for data_item=${item.id}`);
+      }
+      runCases.push({
+        run_case_id: runCaseId,
+        data_item_id: item.id,
+        attempt_no: 1,
+        session_jsonl: item.session_jsonl,
+        user_input: item.user_input,
+        trace_id: item.trace_id,
+        reference_trajectory: item.reference_trajectory,
+        reference_output: item.reference_output
+      });
     }
 
-    await updateExperimentStatus(tx as unknown as Tx, experimentId);
-
-    return { runCaseCount: items.rows.length };
+    return {
+      kind: "ready",
+      runCaseCount: items.rows.length,
+      experiment: {
+        id: experiment.id
+      },
+      dataset: {
+        id: dataset.id,
+        name: dataset.name
+      },
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        agent_key: experiment.agent_key,
+        version: experiment.agent_version,
+        docker_image: experiment.docker_image,
+        openapi_spec: agent.openapi_spec,
+        metadata: agent.metadata
+      },
+      evaluators,
+      runCases
+    };
   });
+
+  if (dispatch.kind === "empty") {
+    return { runCaseCount: 0, queueMessageId: null };
+  }
+
+  let queueResult: { messageId: string; queueName: string };
+  try {
+    queueResult = await publishExperimentRunRequested({
+      experiment_id: dispatch.experiment.id,
+      dataset: dispatch.dataset,
+      agent: dispatch.agent,
+      evaluators: dispatch.evaluators,
+      run_cases: dispatch.runCases,
+      triggered_by: _triggeredBy
+    });
+    await dbQuery(
+      `UPDATE experiments
+       SET queue_message_id = $2,
+           queue_status = 'queued',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 AND deleted_at IS NULL`,
+      [dispatch.experiment.id, queueResult.messageId]
+    );
+  } catch (error) {
+    await withTransaction(async (tx) => {
+      await tx.query(
+        `UPDATE experiments
+         SET queue_status = 'idle',
+             queue_message_id = NULL,
+             queued_at = NULL,
+             started_at = NULL,
+             finished_at = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [dispatch.experiment.id]
+      );
+      await tx.query(`DELETE FROM run_cases WHERE experiment_id = $1`, [dispatch.experiment.id]);
+    });
+    throw error;
+  }
+
+  return { runCaseCount: dispatch.runCaseCount, queueMessageId: queueResult.messageId };
 }
 
 export async function retryFailedRunCases(experimentId: number, _triggeredBy: string) {
   return withTransaction(async (tx) => {
     const exp = await tx.query<ExperimentContext>(
-      `SELECT e.id, e.dataset_id, e.agent_id, e.run_locked, a.agent_key, a.version AS agent_version, a.docker_image
+      `SELECT e.id, e.dataset_id, e.agent_id, e.queue_status, a.agent_key, a.version AS agent_version, a.docker_image
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
        JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
@@ -252,7 +413,14 @@ export async function retryFailedRunCases(experimentId: number, _triggeredBy: st
       throw new Error("Experiment has no evaluators");
     }
 
-    await tx.query(`UPDATE experiments SET status = 'running', finished_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [experimentId]);
+    await tx.query(
+      `UPDATE experiments
+       SET queue_status = 'consuming',
+           finished_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [experimentId]
+    );
 
     const failedLatest = await tx.query<{
       run_case_id: number;
@@ -304,7 +472,7 @@ export async function refreshExperimentStatus(experimentId: number) {
 export async function markExperimentFailed(experimentId: number, reason: string) {
   await dbQuery(
     `UPDATE experiments
-     SET status = 'failed',
+     SET queue_status = 'failed',
          finished_at = CURRENT_TIMESTAMP,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND deleted_at IS NULL`,
