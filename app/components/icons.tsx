@@ -62,6 +62,18 @@ export function FlaskIcon(props: IconProps) {
   );
 }
 
+export function AgentIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <rect x="6" y="7" width="12" height="10" rx="2" />
+      <path d="M12 3v3" />
+      <circle cx="9.5" cy="12" r="1" />
+      <circle cx="14.5" cy="12" r="1" />
+      <path d="M10 15h4" />
+    </BaseIcon>
+  );
+}
+
 export function DotIcon(props: IconProps) {
   return (
     <BaseIcon {...props}>
@@ -122,6 +134,16 @@ export function ArrowLeftIcon(props: IconProps) {
     <BaseIcon {...props}>
       <path d="M19 12H5" />
       <path d="m11 18-6-6 6-6" />
+    </BaseIcon>
+  );
+}
+
+export function OpenInNewIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M14 5h5v5" />
+      <path d="m19 5-8 8" />
+      <path d="M19 13v5a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1h5" />
     </BaseIcon>
   );
 }

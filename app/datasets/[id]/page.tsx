@@ -10,55 +10,76 @@ import {
   FilterIcon,
   PlusIcon,
   RefreshIcon,
-  TraceIcon,
   UserIcon
 } from "@/app/components/icons";
 import { SubmitButton } from "@/app/components/submit-button";
+import { ReferenceTrajectorySourceField } from "@/app/components/reference-trajectory-source-field";
+import { EntityDrawer } from "@/app/components/entity-drawer";
+import { FormField } from "@/app/components/form-field";
+import { TextareaWithFileUpload } from "@/app/components/textarea-with-file-upload";
+
+async function resolveTrajectory(
+  trajectorySource: string,
+  manualReferenceTrajectoryRaw: string
+): Promise<{ traceId: string | null; referenceTrajectory: unknown | null }> {
+  if (trajectorySource.startsWith("trace:")) {
+    const traceId = trajectorySource.slice("trace:".length).trim();
+    if (!traceId) return { traceId: null, referenceTrajectory: null };
+    const traceRows = await dbQuery<{ raw: unknown }>(
+      `SELECT raw FROM traces WHERE trace_id = $1 AND deleted_at IS NULL ORDER BY id ASC LIMIT 500`,
+      [traceId]
+    );
+    return {
+      traceId,
+      referenceTrajectory: traceRows.rows.length > 0 ? traceRows.rows.map((r) => r.raw) : [{ trace_id: traceId }]
+    };
+  }
+  if (trajectorySource === "manual") {
+    return {
+      traceId: null,
+      referenceTrajectory: manualReferenceTrajectoryRaw.trim() ? parseJsonOrWrap(manualReferenceTrajectoryRaw) : null
+    };
+  }
+  return { traceId: null, referenceTrajectory: null };
+}
 
 async function createItem(formData: FormData) {
   "use server";
   const user = await requireUser();
 
   const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
-  const snapshotIdRaw = String(formData.get("snapshotId") ?? "").trim();
   const datasetId = Number(datasetIdRaw);
-  const snapshotId = Number(snapshotIdRaw);
+  const sessionJsonl = String(formData.get("sessionJsonl") ?? "").trim();
   const userInput = String(formData.get("userInput") ?? "").trim();
-  const traceId = String(formData.get("traceId") ?? "").trim();
-  const agentOutput = String(formData.get("agentOutput") ?? "{}");
+  const trajectorySource = String(formData.get("referenceTrajectorySource") ?? "").trim();
+  const manualReferenceTrajectoryRaw = String(formData.get("manualReferenceTrajectory") ?? "");
+  const referenceOutputRaw = String(formData.get("referenceOutput") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
 
-  if (!datasetIdRaw || !snapshotIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !userInput || !Number.isInteger(snapshotId) || snapshotId <= 0) return;
+  if (!datasetIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !userInput) return;
 
-  let finalTrajectory: unknown = null;
-  if (traceId) {
-    const traceRows = await dbQuery<{ raw: unknown }>(
-      `SELECT raw FROM traces WHERE trace_id = $1 ORDER BY id ASC LIMIT 500`,
-      [traceId]
-    );
-    finalTrajectory = traceRows.rows.length > 0 ? traceRows.rows.map((r) => r.raw) : [{ trace_id: traceId }];
-  }
-
-  const snapshot = await dbQuery<{ payload: unknown }>(`SELECT payload FROM snapshot_presets WHERE id = $1`, [snapshotId]);
-  const finalEnvironmentSnapshot = snapshot.rows.length > 0 ? snapshot.rows[0].payload : {};
+  const { traceId, referenceTrajectory } = await resolveTrajectory(trajectorySource, manualReferenceTrajectoryRaw);
+  const referenceOutput = referenceOutputRaw ? parseJsonOrWrap(referenceOutputRaw) : {};
 
   await dbQuery(
     `INSERT INTO data_items (
-      dataset_id, environment_snapshot, user_input, agent_trajectory, agent_output, trace_id, snapshot_id, created_by, updated_by, updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,CURRENT_TIMESTAMP)`,
+      dataset_id, session_jsonl, user_input, reference_output, trace_id, reference_trajectory, created_by, updated_by, updated_at
+    )
+    SELECT $1,$2,$3,$4,$5,$6,$7,$7,CURRENT_TIMESTAMP
+    FROM datasets d
+    WHERE d.id = $1 AND d.deleted_at IS NULL`,
     [
       datasetId,
-      JSON.stringify(finalEnvironmentSnapshot),
+      sessionJsonl || "",
       userInput,
-      JSON.stringify(finalTrajectory),
-      JSON.stringify(parseJsonOrWrap(agentOutput)),
-      traceId || null,
-      snapshotId,
+      JSON.stringify(referenceOutput),
+      traceId,
+      referenceTrajectory === null ? null : JSON.stringify(referenceTrajectory),
       user.id
     ]
   );
 
-  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1`, [datasetId, user.id]);
+  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1 AND deleted_at IS NULL`, [datasetId, user.id]);
 
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
@@ -75,8 +96,16 @@ async function deleteItem(formData: FormData) {
   const id = Number(idRaw);
   const datasetId = Number(datasetIdRaw);
   if (!idRaw || !datasetIdRaw || !Number.isInteger(id) || id <= 0 || !Number.isInteger(datasetId) || datasetId <= 0) return;
-  await dbQuery(`DELETE FROM data_items WHERE id = $1`, [id]);
-  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1`, [datasetId, user.id]);
+  await dbQuery(
+    `UPDATE data_items
+     SET is_deleted = TRUE,
+         deleted_at = CURRENT_TIMESTAMP,
+         updated_by = $2,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [id, user.id]
+  );
+  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1 AND deleted_at IS NULL`, [datasetId, user.id]);
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
 }
@@ -87,54 +116,43 @@ async function updateItem(formData: FormData) {
 
   const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
   const itemIdRaw = String(formData.get("itemId") ?? "").trim();
-  const snapshotIdRaw = String(formData.get("snapshotId") ?? "").trim();
   const datasetId = Number(datasetIdRaw);
   const itemId = Number(itemIdRaw);
-  const snapshotId = Number(snapshotIdRaw);
+  const sessionJsonl = String(formData.get("sessionJsonl") ?? "").trim();
   const userInput = String(formData.get("userInput") ?? "").trim();
-  const traceId = String(formData.get("traceId") ?? "").trim();
-  const agentOutput = String(formData.get("agentOutput") ?? "{}");
+  const trajectorySource = String(formData.get("referenceTrajectorySource") ?? "").trim();
+  const manualReferenceTrajectoryRaw = String(formData.get("manualReferenceTrajectory") ?? "");
+  const referenceOutputRaw = String(formData.get("referenceOutput") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
 
-  if (!datasetIdRaw || !itemIdRaw || !snapshotIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(itemId) || itemId <= 0 || !userInput || !Number.isInteger(snapshotId) || snapshotId <= 0) return;
+  if (!datasetIdRaw || !itemIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(itemId) || itemId <= 0 || !userInput) return;
 
-  let finalTrajectory: unknown = null;
-  if (traceId) {
-    const traceRows = await dbQuery<{ raw: unknown }>(
-      `SELECT raw FROM traces WHERE trace_id = $1 ORDER BY id ASC LIMIT 500`,
-      [traceId]
-    );
-    finalTrajectory = traceRows.rows.length > 0 ? traceRows.rows.map((r) => r.raw) : [{ trace_id: traceId }];
-  }
-
-  const snapshot = await dbQuery<{ payload: unknown }>(`SELECT payload FROM snapshot_presets WHERE id = $1`, [snapshotId]);
-  const finalEnvironmentSnapshot = snapshot.rows.length > 0 ? snapshot.rows[0].payload : {};
+  const { traceId, referenceTrajectory } = await resolveTrajectory(trajectorySource, manualReferenceTrajectoryRaw);
+  const referenceOutput = referenceOutputRaw ? parseJsonOrWrap(referenceOutputRaw) : {};
 
   await dbQuery(
     `UPDATE data_items
-     SET environment_snapshot = $3,
+     SET session_jsonl = $3,
          user_input = $4,
-         agent_trajectory = $5,
-         agent_output = $6,
-         trace_id = $7,
-         snapshot_id = $8,
-         updated_by = $9,
+         reference_output = $5,
+         trace_id = $6,
+         reference_trajectory = $7,
+         updated_by = $8,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1 AND dataset_id = $2`,
+     WHERE id = $1 AND dataset_id = $2 AND deleted_at IS NULL`,
     [
       itemId,
       datasetId,
-      JSON.stringify(finalEnvironmentSnapshot),
+      sessionJsonl || "",
       userInput,
-      JSON.stringify(finalTrajectory),
-      JSON.stringify(parseJsonOrWrap(agentOutput)),
-      traceId || null,
-      snapshotId,
+      JSON.stringify(referenceOutput),
+      traceId,
+      referenceTrajectory === null ? null : JSON.stringify(referenceTrajectory),
       user.id
     ]
   );
 
-  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1`, [datasetId, user.id]);
+  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1 AND deleted_at IS NULL`, [datasetId, user.id]);
 
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
@@ -170,7 +188,7 @@ export default async function DatasetDetailPage({
     updated_at: string;
     created_by: string;
   }>(
-    `SELECT id, name, description, created_at, updated_at, created_by FROM datasets WHERE id = $1`,
+    `SELECT id, name, description, created_at, updated_at, created_by FROM datasets WHERE id = $1 AND deleted_at IS NULL`,
     [id]
   );
 
@@ -178,28 +196,29 @@ export default async function DatasetDetailPage({
     return <section className="card">评测集不存在</section>;
   }
 
-  const [items, traceIds, snapshotPresets] = await Promise.all([
+  const [items, traceIds] = await Promise.all([
     dbQuery<{
       id: number;
+      session_jsonl: string;
       user_input: string;
       trace_id: string | null;
-      snapshot_id: number | null;
-      agent_trajectory: unknown;
-      agent_output: unknown;
+      reference_output: unknown;
+      reference_trajectory: unknown;
       updated_at: string;
       created_at: string;
     }>(
-      `SELECT id, user_input, trace_id, snapshot_id, agent_trajectory, agent_output, updated_at, created_at
+      `SELECT id, session_jsonl, user_input, trace_id, reference_output, reference_trajectory, updated_at, created_at
        FROM data_items
-       WHERE dataset_id = $1 AND ($2 = '' OR LOWER(user_input) LIKE CONCAT('%', LOWER($3), '%'))
+       WHERE dataset_id = $1
+         AND deleted_at IS NULL
+         AND ($2 = '' OR LOWER(user_input) LIKE CONCAT('%', LOWER($3), '%'))
        ORDER BY updated_at DESC`,
       [id, qv, qv]
     ),
     dbQuery<{ trace_id: string }>(
-      `SELECT trace_id FROM traces WHERE trace_id IS NOT NULL AND trace_id <> '' GROUP BY trace_id ORDER BY MAX(id) DESC LIMIT 200`
-    ),
-    dbQuery<{ id: number; name: string }>(
-      `SELECT id, name FROM snapshot_presets ORDER BY created_at ASC`
+      `SELECT trace_id FROM traces
+       WHERE deleted_at IS NULL AND trace_id IS NOT NULL AND trace_id <> ''
+       GROUP BY trace_id ORDER BY MAX(id) DESC LIMIT 200`
     )
   ]);
 
@@ -207,6 +226,7 @@ export default async function DatasetDetailPage({
   const baseHref = qv ? `/datasets/${id}?q=${encodeURIComponent(qv)}` : `/datasets/${id}`;
   const editingItem = editId ? items.rows.find((item) => item.id === editId) : undefined;
   const showingEditor = adding || Boolean(editingItem);
+  const itemEditorFormId = editingItem ? `item-editor-${editingItem.id}` : "item-editor-create";
 
   return (
     <>
@@ -222,7 +242,7 @@ export default async function DatasetDetailPage({
             </Link>
             <div>
               <h1>{dataset.name}</h1>
-              <p className="muted">评测集详情与数据项维护</p>
+              <p className="muted">评测集详情与 DataItems 维护</p>
             </div>
           </div>
           <div className="meta-pills">
@@ -238,13 +258,13 @@ export default async function DatasetDetailPage({
         <section className="card">
           <div className="section-title-row data-toolbar">
             <h2>
-              <DatasetIcon width={16} height={16} /> 数据项
+              <DatasetIcon width={16} height={16} /> DataItems
             </h2>
             <div className="action-group">
               <form action={`/datasets/${id}`} className="search-form compact">
                 <label className="input-icon-wrap compact">
                   <FilterIcon width={14} height={14} />
-                  <input name="q" defaultValue={qv} placeholder="搜索数据项" />
+                  <input name="q" defaultValue={qv} placeholder="搜索 DataItems" />
                 </label>
                 <button type="submit" className="ghost-btn small">
                   筛选
@@ -267,9 +287,10 @@ export default async function DatasetDetailPage({
               <thead>
                 <tr>
                   <th>ID</th>
+                  <th>session_jsonl</th>
                   <th>input</th>
                   <th>reference_output</th>
-                  <th>trajectory</th>
+                  <th>trace/trajectory</th>
                   <th>更新时间</th>
                   <th>创建时间</th>
                   <th>操作</th>
@@ -281,11 +302,12 @@ export default async function DatasetDetailPage({
                     <td>
                       <code>{item.id}</code>
                     </td>
+                    <td className="muted">{item.session_jsonl.slice(0, 80)}</td>
                     <td className="muted">{item.user_input.slice(0, 80)}</td>
-                    <td className="muted">{JSON.stringify(item.agent_output).slice(0, 90)}...</td>
+                    <td className="muted">{JSON.stringify(item.reference_output).slice(0, 90)}...</td>
                     <td className="muted">
                       {item.trace_id ? <span className="tag">trace: {item.trace_id}</span> : null}
-                      <div>{JSON.stringify(item.agent_trajectory).slice(0, 90)}...</div>
+                      <div>{JSON.stringify(item.reference_trajectory).slice(0, 90)}...</div>
                     </td>
                     <td>{new Date(item.updated_at).toLocaleString()}</td>
                     <td>{new Date(item.created_at).toLocaleString()}</td>
@@ -319,110 +341,83 @@ export default async function DatasetDetailPage({
       </div>
 
       {showingEditor ? (
-        <div className="add-overlay">
-          <Link href={baseHref} className="add-overlay-dismiss" aria-label="关闭抽屉蒙层" />
-          <div className="add-drawer">
-            <div className="add-drawer-header">
-              <h3>{editingItem ? "数据详情" : "添加数据"}</h3>
-              <Link href={baseHref} className="icon-btn" aria-label="关闭">
-                <span style={{ fontSize: 18, lineHeight: 1 }}>×</span>
-              </Link>
-            </div>
+        <EntityDrawer closeHref={baseHref} title={editingItem ? "数据详情" : "添加数据"} drawerClassName="wide">
+          <form id={itemEditorFormId} action={editingItem ? updateItem : createItem} className="drawer-form form-tone-green">
+            <input type="hidden" name="datasetId" value={id} />
+            <input type="hidden" name="q" value={qv} />
+            {editingItem ? <input type="hidden" name="itemId" value={editingItem.id} /> : null}
 
-            <div className="add-drawer-body">
-              <aside className="item-side-list">
-                <div className="item-side-title active">数据项 1</div>
-              </aside>
+            <FormField title="input" typeLabel="String" required>
+              <TextareaWithFileUpload
+                name="userInput"
+                placeholder="用户目标（user_input）"
+                required
+                defaultValue={editingItem?.user_input ?? ""}
+                accept=".txt,.md,.json"
+              />
+            </FormField>
 
-              <section className="item-editor">
-                <form action={editingItem ? updateItem : createItem} className="drawer-form">
-                  <input type="hidden" name="datasetId" value={id} />
-                  <input type="hidden" name="q" value={qv} />
-                  {editingItem ? <input type="hidden" name="itemId" value={editingItem.id} /> : null}
+            <FormField title="session_jsonl" typeLabel="Optional">
+              <TextareaWithFileUpload
+                name="sessionJsonl"
+                placeholder="会话历史 jsonl（每行一个 JSON）"
+                defaultValue={editingItem?.session_jsonl ?? ""}
+                accept=".jsonl,.txt,.json"
+                hint="支持粘贴或上传 .jsonl 文件"
+              />
+            </FormField>
 
-                  <div className="field-group">
-                    <label className="field-head">
-                      <span className="field-title">input</span>
-                      <span className="type-pill">String</span>
-                    </label>
-                    <textarea
-                      name="userInput"
-                      placeholder="用户目标（user-input）"
-                      required
-                      defaultValue={editingItem?.user_input ?? ""}
-                    />
-                  </div>
+            <FormField title="reference_output" typeLabel="Optional">
+              <TextareaWithFileUpload
+                name="referenceOutput"
+                placeholder='例如 {"result":"success"}'
+                defaultValue={
+                  editingItem?.reference_output
+                    ? typeof editingItem.reference_output === "string"
+                      ? editingItem.reference_output
+                      : JSON.stringify(editingItem.reference_output, null, 2)
+                    : "{}"
+                }
+                accept=".json,.txt"
+              />
+            </FormField>
 
-                  <div className="field-group">
-                    <label className="field-head">
-                      <span className="field-title">reference_output</span>
-                      <span className="type-pill">String / JSON</span>
-                    </label>
-                    <textarea
-                      name="agentOutput"
-                      placeholder='例如 {"result":"success"}'
-                      required
-                      defaultValue={
-                        editingItem?.agent_output
-                          ? typeof editingItem.agent_output === "string"
-                            ? editingItem.agent_output
-                            : JSON.stringify(editingItem.agent_output, null, 2)
-                          : ""
-                      }
-                    />
-                  </div>
-
-                  <div className="field-group">
-                    <label className="field-head">
-                      <span className="field-title">trajectory</span>
-                      <span className="type-pill">轨迹</span>
-                    </label>
-                    <label className="trace-import-row">
-                      <TraceIcon width={14} height={14} /> 选择 Trace ID（自动导入 trajectory）
-                    </label>
-                    <select name="traceId" defaultValue={editingItem?.trace_id ?? ""}>
-                      <option value="">
-                        不选择 trajectory（可选）
-                      </option>
-                      {traceIds.rows.map((t) => (
-                        <option key={t.trace_id} value={t.trace_id}>
-                          {t.trace_id}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="field-group">
-                    <label className="field-head">
-                      <span className="field-title">environment-snapshot</span>
-                      <span className="type-pill">JSON</span>
-                    </label>
-                    <label className="trace-import-row">从预设快照表选择 snapshot_id</label>
-                    <select name="snapshotId" required defaultValue={editingItem?.snapshot_id ?? ""}>
-                      <option value="" disabled>
-                        请选择 snapshot_id
-                      </option>
-                      {snapshotPresets.rows.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.id})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="drawer-actions">
-                    <SubmitButton className="primary-btn" pendingText={editingItem ? "更新中..." : "添加中..."}>
-                      {editingItem ? "更新" : "添加"}
-                    </SubmitButton>
-                    <Link href={baseHref} className="ghost-btn">
-                      取消
-                    </Link>
-                  </div>
-                </form>
-              </section>
-            </div>
+            <ReferenceTrajectorySourceField
+              traceIds={traceIds.rows.map((t) => t.trace_id)}
+              defaultSource={
+                editingItem?.trace_id ? `trace:${editingItem.trace_id}` : editingItem?.reference_trajectory ? "manual" : ""
+              }
+              defaultManual={
+                !editingItem?.trace_id && editingItem?.reference_trajectory
+                  ? typeof editingItem.reference_trajectory === "string"
+                    ? editingItem.reference_trajectory
+                    : JSON.stringify(editingItem.reference_trajectory, null, 2)
+                  : ""
+              }
+            />
+          </form>
+          <div className="drawer-actions">
+            <SubmitButton
+              form={itemEditorFormId}
+              className="primary-btn"
+              pendingText={editingItem ? "更新中..." : "添加中..."}
+            >
+              {editingItem ? "更新" : "添加"}
+            </SubmitButton>
+            {editingItem ? (
+              <form action={deleteItem} className="drawer-inline-form">
+                <input type="hidden" name="id" value={editingItem.id} />
+                <input type="hidden" name="datasetId" value={id} />
+                <SubmitButton className="danger-btn" pendingText="删除中...">
+                  删除
+                </SubmitButton>
+              </form>
+            ) : null}
+            <Link href={baseHref} className="ghost-btn">
+              取消
+            </Link>
           </div>
-        </div>
+        </EntityDrawer>
       ) : null}
     </>
   );

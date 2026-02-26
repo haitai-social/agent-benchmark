@@ -4,33 +4,30 @@ CREATE TABLE IF NOT EXISTS datasets (
   description TEXT NOT NULL,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_datasets_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS data_items (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   dataset_id BIGINT UNSIGNED NOT NULL,
-  environment_snapshot JSON NOT NULL,
+  session_jsonl LONGTEXT NOT NULL,
   user_input TEXT NOT NULL,
-  agent_trajectory JSON,
-  agent_output JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  reference_output JSON NOT NULL,
   trace_id VARCHAR(255),
-  snapshot_id BIGINT UNSIGNED,
+  reference_trajectory JSON,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_data_items_dataset
-    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS snapshot_presets (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  preset_key VARCHAR(255) NOT NULL UNIQUE,
-  name VARCHAR(255) NOT NULL,
-  payload JSON NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE,
+  INDEX idx_data_items_dataset_deleted (dataset_id, is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS evaluators (
@@ -42,8 +39,11 @@ CREATE TABLE IF NOT EXISTS evaluators (
   model_name VARCHAR(255) NOT NULL DEFAULT 'gpt-4.1-mini',
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_evaluators_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS traces (
@@ -58,62 +58,117 @@ CREATE TABLE IF NOT EXISTS traces (
   end_time DATETIME,
   status VARCHAR(100),
   raw JSON NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_traces_is_deleted (is_deleted)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS agents (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  agent_key VARCHAR(255) NOT NULL,
+  version VARCHAR(255) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  description TEXT NOT NULL,
+  docker_image VARCHAR(1024) NOT NULL,
+  openapi_spec JSON NOT NULL,
+  status VARCHAR(100) NOT NULL DEFAULT 'active',
+  metadata JSON NOT NULL,
+  created_by VARCHAR(255) NOT NULL,
+  updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT uq_agents_key_version UNIQUE (agent_key, version),
+  INDEX idx_agents_key (agent_key),
+  INDEX idx_agents_status (status),
+  INDEX idx_agents_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS experiments (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
   dataset_id BIGINT UNSIGNED NOT NULL,
-  agent_version VARCHAR(255) NOT NULL,
-  status VARCHAR(100) NOT NULL DEFAULT 'draft',
+  agent_id BIGINT UNSIGNED NOT NULL,
+  status VARCHAR(100) NOT NULL DEFAULT 'ready',
+  run_locked TINYINT(1) NOT NULL DEFAULT 0,
+  started_at TIMESTAMP NULL DEFAULT NULL,
+  finished_at TIMESTAMP NULL DEFAULT NULL,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_experiments_dataset
-    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE RESTRICT
+    FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_experiments_agent
+    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE RESTRICT,
+  INDEX idx_experiments_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS experiment_runs (
+CREATE TABLE IF NOT EXISTS experiment_evaluators (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   experiment_id BIGINT UNSIGNED NOT NULL,
-  status VARCHAR(100) NOT NULL DEFAULT 'running',
-  triggered_by VARCHAR(255) NOT NULL,
-  started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  finished_at DATETIME,
-  summary JSON NOT NULL DEFAULT (JSON_OBJECT()),
-  CONSTRAINT fk_experiment_runs_experiment
-    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS run_item_results (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  run_id BIGINT UNSIGNED NOT NULL,
-  data_item_id BIGINT UNSIGNED NOT NULL,
-  environment_build_status VARCHAR(255) NOT NULL,
-  input_delivery_status VARCHAR(255) NOT NULL,
-  agent_trajectory JSON NOT NULL,
-  agent_output JSON NOT NULL,
-  judge_scores JSON NOT NULL,
-  final_score DOUBLE NOT NULL,
-  logs TEXT NOT NULL,
+  evaluator_id BIGINT UNSIGNED NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_run_item_results_run
-    FOREIGN KEY (run_id) REFERENCES experiment_runs(id) ON DELETE CASCADE,
-  CONSTRAINT fk_run_item_results_data_item
-    FOREIGN KEY (data_item_id) REFERENCES data_items(id) ON DELETE CASCADE
+  CONSTRAINT fk_experiment_evaluators_experiment
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+  CONSTRAINT fk_experiment_evaluators_evaluator
+    FOREIGN KEY (evaluator_id) REFERENCES evaluators(id) ON DELETE RESTRICT,
+  CONSTRAINT uq_experiment_evaluator UNIQUE (experiment_id, evaluator_id),
+  INDEX idx_experiment_evaluators_experiment (experiment_id),
+  INDEX idx_experiment_evaluators_evaluator (evaluator_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- >>> seed data begin
--- Seed snapshot presets
-INSERT INTO snapshot_presets (preset_key, name, payload) VALUES ('web_default', 'Web 浏览器环境', '{"platform":"web","browser":"chromium","network":"online","locale":"zh-CN"}')
-ON DUPLICATE KEY UPDATE name = VALUES(name), payload = VALUES(payload);
+CREATE TABLE IF NOT EXISTS run_cases (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  experiment_id BIGINT UNSIGNED NOT NULL,
+  data_item_id BIGINT UNSIGNED NOT NULL,
+  agent_id BIGINT UNSIGNED NOT NULL,
+  attempt_no INT NOT NULL,
+  is_latest TINYINT(1) NOT NULL DEFAULT 1,
+  status VARCHAR(100) NOT NULL DEFAULT 'pending',
+  agent_trajectory JSON DEFAULT NULL,
+  agent_output JSON DEFAULT NULL,
+  final_score DOUBLE DEFAULT NULL,
+  latency_ms BIGINT DEFAULT NULL,
+  input_tokens BIGINT DEFAULT NULL,
+  output_tokens BIGINT DEFAULT NULL,
+  error_message TEXT DEFAULT NULL,
+  logs LONGTEXT DEFAULT NULL,
+  started_at TIMESTAMP NULL DEFAULT NULL,
+  finished_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_run_cases_experiment
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+  CONSTRAINT fk_run_cases_data_item
+    FOREIGN KEY (data_item_id) REFERENCES data_items(id) ON DELETE CASCADE,
+  CONSTRAINT fk_run_cases_agent
+    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE RESTRICT,
+  CONSTRAINT uq_run_case_attempt UNIQUE (experiment_id, data_item_id, attempt_no),
+  INDEX idx_run_cases_experiment_latest_status (experiment_id, is_latest, status),
+  INDEX idx_run_cases_experiment_created (experiment_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO snapshot_presets (preset_key, name, payload) VALUES ('repo_node', '代码仓库环境', '{"platform":"repo","os":"ubuntu-22.04","runtime":"node18","tools":["git","npm"]}')
-ON DUPLICATE KEY UPDATE name = VALUES(name), payload = VALUES(payload);
-
-INSERT INTO snapshot_presets (preset_key, name, payload) VALUES ('ubuntu_terminal', 'Ubuntu 终端环境', '{"platform":"ubuntu","version":"22.04","shell":"bash","network":"restricted"}')
-ON DUPLICATE KEY UPDATE name = VALUES(name), payload = VALUES(payload);
+CREATE TABLE IF NOT EXISTS evaluate_results (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  run_case_id BIGINT UNSIGNED NOT NULL,
+  evaluator_id BIGINT UNSIGNED NOT NULL,
+  score DOUBLE NOT NULL,
+  reason TEXT NOT NULL,
+  raw_result JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_evaluate_results_run_case
+    FOREIGN KEY (run_case_id) REFERENCES run_cases(id) ON DELETE CASCADE,
+  CONSTRAINT fk_evaluate_results_evaluator
+    FOREIGN KEY (evaluator_id) REFERENCES evaluators(id) ON DELETE RESTRICT,
+  CONSTRAINT uq_evaluate_result UNIQUE (run_case_id, evaluator_id),
+  INDEX idx_evaluate_results_run_case (run_case_id),
+  INDEX idx_evaluate_results_evaluator (evaluator_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Seed evaluators
 INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('task_success', '任务成功', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。

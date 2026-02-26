@@ -3,14 +3,15 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { AuthUser } from "@/lib/supabase-auth";
-import { DatasetIcon, FlaskIcon, HomeIcon, JudgeIcon, TraceIcon } from "./icons";
+import { AgentIcon, DatasetIcon, FlaskIcon, HomeIcon, JudgeIcon, TraceIcon } from "./icons";
 
 const nav = [
   { href: "/", label: "总览", icon: HomeIcon },
-  { href: "/datasets", label: "评测集", icon: DatasetIcon },
-  { href: "/evaluators", label: "评估器", icon: JudgeIcon },
+  { href: "/datasets", label: "Datasets", icon: DatasetIcon },
+  { href: "/agents", label: "Agents", icon: AgentIcon },
+  { href: "/evaluators", label: "Evaluators", icon: JudgeIcon },
   { href: "/traces", label: "Trace", icon: TraceIcon },
-  { href: "/experiments", label: "实验运行", icon: FlaskIcon }
+  { href: "/experiments", label: "Experiments", icon: FlaskIcon }
 ];
 
 function getUserDisplay(user: AuthUser | null) {

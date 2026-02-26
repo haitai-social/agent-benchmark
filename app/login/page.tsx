@@ -18,7 +18,7 @@ export default async function LoginPage({
 
   const safeNext = sanitizeNextPath(next);
   const features = [
-    { icon: DatasetIcon, label: "评测集与数据项" },
+    { icon: DatasetIcon, label: "Datasets 与 DataItems" },
     { icon: JudgeIcon, label: "评估器管理" },
     { icon: TraceIcon, label: "Trace 检索" },
     { icon: FlaskIcon, label: "实验运行" }

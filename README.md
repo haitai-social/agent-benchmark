@@ -1,20 +1,28 @@
 # Agent Benchmark 管理/运行平台
 
-基于 Next.js + Postgres 的 benchmark 平台，包含：
-- 评测集/数据项管理
-- LLM as Judge 评估器管理（自动加载 `llm-as-judge-demo/` 四个预设）
+基于 Next.js + Postgres/MySQL 的 benchmark 平台，包含：
+- 评测集/数据项管理（case: `session_jsonl + user_input + reference_output + trace_id/reference_trajectory`）
+- Agent 实体管理（`agent_key + version` 版本化，绑定 `docker_image + openapi_spec`）
+- LLM as Judge 评估器管理
 - OpenTelemetry Trace 上报与查看
-- 实验管理与运行（环境构建 -> 输入下发 -> 轨迹/输出评估）
+- 实验管理与运行（选择 dataset + agent 后运行）
 
 ## 1. 环境变量
 
-项目直接读取 `.env`（你已提供）：
+项目直接读取 `.env`：
 
 - `POSTGRES_SERVER`
 - `POSTGRES_USER`
 - `POSTGRES_PASSWORD`
 - `POSTGRES_PORT`
-- `POSTGRES_DB` (应为 `benchmark`)
+- `POSTGRES_DB`
+
+MySQL 模式使用：
+- `MYSQL_SERVER`
+- `MYSQL_USER`
+- `MYSQL_PASSWORD`
+- `MYSQL_PORT`
+- `MYSQL_DB`
 
 可选：
 - `OPENAI_API_KEY`（提供后使用真实 LLM Judge）
@@ -30,22 +38,24 @@ npm run dev
 启动后访问：
 - `/` 总览
 - `/datasets` 评测集与数据项
+- `/agents` Agent 管理
 - `/evaluators` 评估器
 - `/traces` Trace
 - `/experiments` 实验管理与运行
 
 ## 3. 数据库
 
-服务端首次访问数据库时会自动：
-- 创建表：
-  - `datasets`
-  - `data_items`
-  - `evaluators`
-  - `traces`
-  - `experiments`
-  - `experiment_runs`
-  - `run_item_results`
-- 从 `llm-as-judge-demo/*.txt` 自动写入/更新 4 个评估器
+首次访问数据库时会根据 `db/init.postgres.sql` 或 `db/init.mysql.sql` 初始化。
+
+核心表：
+- `datasets`
+- `data_items`
+- `agents`
+- `evaluators`
+- `traces`
+- `experiments`
+- `experiment_runs`
+- `run_item_results`
 
 ## 4. OpenTelemetry 上报
 
@@ -55,33 +65,14 @@ npm run dev
 POST /api/otel/v1/traces
 ```
 
-支持：
-1. OTLP JSON（`resourceSpans` 结构）
-2. 简化结构：
-
-```json
-{
-  "spans": [
-    {
-      "traceId": "demo-trace",
-      "spanId": "demo-span",
-      "name": "benchmark.run",
-      "serviceName": "benchmark-platform",
-      "attributes": {"env": "test"},
-      "status": "OK",
-      "startTime": "2026-02-24T10:00:00.000Z",
-      "endTime": "2026-02-24T10:00:01.000Z"
-    }
-  ]
-}
-```
+支持 OTLP JSON（`resourceSpans`）与简化 spans JSON。
 
 ## 5. 实验运行语义
 
-实验运行会按数据项执行：
-1. `environment-snapshot` -> 判定环境构建状态
-2. `user-input` -> 判定输入下发状态
-3. 使用 `agent-trajectory` + `agent-output` + 启用评估器打分
-4. 写入 `run_item_results` 与 `experiment_runs.summary`
+当前默认 `replay` 模式：
+1. 读取实验绑定的 `agent`（记录 `agent_key/version/docker_image`）
+2. 读取 case 的 `session_jsonl + user_input`
+3. 使用 `reference_trajectory + reference_output` 作为当前阶段运行产物
+4. 使用评估器打分并写入 `run_item_results`
 
-当前默认是 `replay` 模式（复用数据项里的轨迹和输出）；若配置 `OPENAI_API_KEY`，评估步骤会调用真实 LLM Judge。
+后续可将第 3 步替换为真实 docker + `/run` 调用。
