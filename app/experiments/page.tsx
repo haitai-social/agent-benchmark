@@ -13,7 +13,12 @@ async function createExperiment(formData: FormData) {
   const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
   const datasetId = Number(datasetIdRaw);
   const agentVersion = String(formData.get("agentVersion") ?? "v1").trim();
-  if (!name || !datasetIdRaw || !Number.isInteger(datasetId) || datasetId <= 0) return;
+  if (!name) {
+    throw new Error("实验名称不能为空");
+  }
+  if (!datasetIdRaw || !Number.isInteger(datasetId) || datasetId <= 0) {
+    throw new Error("评测集 ID 非法。若数据库仍是旧 UUID 结构，请先按最新 init SQL 重建。");
+  }
 
   await dbQuery(`INSERT INTO experiments (name, dataset_id, agent_version, status, created_by, updated_by) VALUES ($1,$2,$3,'ready',$4,$4)`, [
     name,
