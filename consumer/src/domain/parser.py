@@ -14,6 +14,10 @@ from .contracts import (
 
 
 def parse_message(payload: dict[str, Any]) -> ExperimentRunRequested:
+    schema_version = payload.get("schema_version", "v2")
+    if schema_version != "v2":
+        raise ValueError(f"E_UNSUPPORTED_SCHEMA_VERSION: {schema_version}")
+
     run_cases: list[RunCaseInput] = []
     for rc in payload.get("run_cases", []):
         mock_cfg = rc.get("mock_config")
@@ -49,14 +53,14 @@ def parse_message(payload: dict[str, Any]) -> ExperimentRunRequested:
 
     return ExperimentRunRequested(
         message_type=payload["message_type"],
-        schema_version=payload.get("schema_version", "v1"),
+        schema_version=schema_version,
         message_id=payload.get("message_id", ""),
         produced_at=payload.get("produced_at", ""),
         source=dict(payload.get("source") or {}),
         experiment=ExperimentRef(**payload["experiment"]),
         dataset=DatasetRef(**payload["dataset"]),
         agent=AgentRef(**payload["agent"]),
-        evaluators=list(payload.get("evaluators") or []),
+        scorers=list(payload.get("scorers") or []),
         run_cases=run_cases,
         consumer_hints=dict(payload.get("consumer_hints") or {}),
     )

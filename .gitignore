@@ -20,3 +20,15 @@ pnpm-debug.log*
 
 # macOS
 .DS_Store
+
+# python
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+.inspect_ai/
+**/.inspect_ai/
+.venv_py39_backup_20260227/
+**/.venv_py39_backup_20260227/

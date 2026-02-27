@@ -39,9 +39,7 @@ class AgentRef:
     name: str
     agent_key: str
     version: str
-    docker_image: str
-    openapi_spec: Any
-    metadata: Any
+    runtime_spec_json: dict[str, Any]
 
 
 @dataclass
@@ -66,9 +64,9 @@ class ExperimentRunRequested:
     experiment: ExperimentRef
     dataset: DatasetRef
     agent: AgentRef
-    evaluators: list[dict[str, Any]]
+    scorers: list[dict[str, Any]]
     run_cases: list[RunCaseInput]
-    consumer_hints: dict[str, bool]
+    consumer_hints: dict[str, Any]
 
 
 @dataclass
@@ -77,6 +75,7 @@ class CaseExecutionResult:
     status: str
     trajectory: Any = None
     output: Any = None
+    scorer_results: list[dict[str, Any]] = field(default_factory=list)
     logs: str = ""
     error_message: str = ""
     exit_code: int = 0
@@ -85,3 +84,6 @@ class CaseExecutionResult:
     container_image: str = ""
     execution_policy: str = "ephemeral_container_per_case"
     mock_sidecar_endpoint: str = ""
+    inspect_eval_id: str = ""
+    inspect_sample_id: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)

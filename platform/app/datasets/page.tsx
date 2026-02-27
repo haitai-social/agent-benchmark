@@ -8,6 +8,14 @@ import { SubmitButton } from "../components/submit-button";
 import { EntityDrawer } from "../components/entity-drawer";
 import { FormField } from "../components/form-field";
 
+function buildListHref(q: string, minItems: string, updatedIn: string) {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (minItems !== "all") params.set("minItems", minItems);
+  if (updatedIn !== "all") params.set("updatedIn", updatedIn);
+  return params.size > 0 ? `/datasets?${params.toString()}` : "/datasets";
+}
+
 async function createDataset(formData: FormData) {
   "use server";
   const user = await requireUser();
@@ -25,11 +33,7 @@ async function createDataset(formData: FormData) {
     [name, description, user.id, name]
   );
   revalidatePath("/datasets");
-  const params = new URLSearchParams();
-  if (q) params.set("q", q);
-  if (minItems !== "all") params.set("minItems", minItems);
-  if (updatedIn !== "all") params.set("updatedIn", updatedIn);
-  redirect(params.size > 0 ? `/datasets?${params.toString()}` : "/datasets");
+  redirect(buildListHref(q, minItems, updatedIn));
 }
 
 async function deleteDataset(formData: FormData) {
@@ -38,6 +42,9 @@ async function deleteDataset(formData: FormData) {
 
   const idRaw = String(formData.get("id") ?? "").trim();
   const id = Number(idRaw);
+  const q = String(formData.get("q") ?? "").trim();
+  const minItems = String(formData.get("minItems") ?? "all").trim() || "all";
+  const updatedIn = String(formData.get("updatedIn") ?? "all").trim() || "all";
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
   await dbQuery(
     `UPDATE datasets
@@ -69,6 +76,7 @@ async function deleteDataset(formData: FormData) {
   );
   revalidatePath("/datasets");
   revalidatePath("/experiments");
+  redirect(buildListHref(q, minItems, updatedIn));
 }
 
 async function updateDataset(formData: FormData) {
@@ -98,11 +106,7 @@ async function updateDataset(formData: FormData) {
     [id, name, description, user.id]
   );
   revalidatePath("/datasets");
-  const params = new URLSearchParams();
-  if (q) params.set("q", q);
-  if (minItems !== "all") params.set("minItems", minItems);
-  if (updatedIn !== "all") params.set("updatedIn", updatedIn);
-  redirect(params.size > 0 ? `/datasets?${params.toString()}` : "/datasets");
+  redirect(buildListHref(q, minItems, updatedIn));
 }
 
 export default async function DatasetsPage({
@@ -249,10 +253,16 @@ export default async function DatasetsPage({
                 <td>
                   <div className="row-actions">
                     <Link href={`${listHref}${listHref.includes("?") ? "&" : "?"}id=${row.id}`} className="text-btn">
+                      更新
+                    </Link>
+                    <Link href={`/datasets/${row.id}`} className="text-btn">
                       详情
                     </Link>
                     <form action={deleteDataset}>
                       <input type="hidden" name="id" value={row.id} />
+                      <input type="hidden" name="q" value={queryText} />
+                      <input type="hidden" name="minItems" value={minItems} />
+                      <input type="hidden" name="updatedIn" value={updatedIn} />
                       <SubmitButton className="text-btn danger" pendingText="删除中...">
                         删除
                       </SubmitButton>

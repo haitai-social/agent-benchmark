@@ -1,10 +1,10 @@
-from consumer.parser import parse_message
+from domain.parser import parse_message
 
 
 def test_parse_message_with_mock_config() -> None:
     payload = {
         "message_type": "experiment.run.requested",
-        "schema_version": "v1",
+        "schema_version": "v2",
         "message_id": "m1",
         "produced_at": "2024-01-01T00:00:00Z",
         "source": {"service": "platform", "queue": "q"},
@@ -15,11 +15,9 @@ def test_parse_message_with_mock_config() -> None:
             "name": "a",
             "agent_key": "k",
             "version": "v",
-            "docker_image": "busybox",
-            "openapi_spec": {},
-            "metadata": {},
+            "runtime_spec_json": {"agent_image": "busybox:latest", "runtime_type": "agno_docker"},
         },
-        "evaluators": [],
+        "scorers": [],
         "run_cases": [
             {
                 "run_case_id": 10,

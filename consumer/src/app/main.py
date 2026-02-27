@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from .config import load_settings
+from infrastructure.config import load_settings
 from .worker import ConsumerWorker
 
 

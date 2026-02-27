@@ -223,7 +223,7 @@ export default async function EvaluatorsPage({
                       }
                       className="text-btn"
                     >
-                      详情
+                      更新
                     </Link>
                     <form action={deleteEvaluator}>
                       <input type="hidden" name="id" value={row.id} />

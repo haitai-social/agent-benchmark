@@ -31,10 +31,8 @@ export type Agent = {
   version: string;
   name: string;
   description: string;
-  docker_image: string;
-  openapi_spec: Record<string, unknown>;
+  runtime_spec_json: Record<string, unknown>;
   status: string;
-  metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 };

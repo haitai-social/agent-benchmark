@@ -1,0 +1,12 @@
+{
+  "include": ["src/**/*.py", "tests/**/*.py", "scripts/**/*.py"],
+  "exclude": [".venv", "**/__pycache__", ".pytest_cache"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["src"]
+    }
+  ]
+}

@@ -803,6 +803,18 @@ a {
   display: inline-flex;
 }
 
+.row-actions form .text-btn {
+  height: auto;
+  min-height: 0;
+  border-radius: 0;
+}
+
+.row-actions .submit-btn-inner {
+  display: inline;
+  min-width: 0;
+  gap: 0;
+}
+
 .text-btn {
   background: transparent;
   color: #4f46e5;
@@ -822,6 +834,15 @@ a {
 .text-btn:hover {
   color: #4338ca;
   text-decoration-color: currentColor;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.text-btn:focus-visible {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .text-btn.danger {

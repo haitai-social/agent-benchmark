@@ -3,14 +3,21 @@ from __future__ import annotations
 import json
 import urllib.request
 from dataclasses import dataclass
+from typing import Protocol
 
-from .contracts import MockConfig
+from testcontainers.core.container import DockerContainer
+
+from domain.contracts import MockConfig
+
+
+class StoppableContainer(Protocol):
+    def stop(self) -> None: ...
 
 
 @dataclass
 class SidecarHandle:
     endpoint: str
-    _container: object | None
+    _container: StoppableContainer | None
 
     def close(self) -> None:
         if self._container is not None:
@@ -21,11 +28,6 @@ class SidecarHandle:
 def start_mock_sidecar(cfg: MockConfig | None) -> SidecarHandle | None:
     if cfg is None:
         return None
-
-    try:
-        from testcontainers.core.container import DockerContainer
-    except Exception as e:  # lazy import to keep unit tests runnable without dependency
-        raise RuntimeError("testcontainers is required for mock sidecar") from e
 
     container = DockerContainer("wiremock/wiremock:3.9.1").with_exposed_ports(8080)
     container.start()

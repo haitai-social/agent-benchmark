@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS agents (
   openapi_spec JSON NOT NULL,
   status VARCHAR(100) NOT NULL DEFAULT 'active',
   metadata JSON NOT NULL,
+  runtime_spec_json JSON NOT NULL,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
   is_deleted TINYINT(1) NOT NULL DEFAULT 0,
@@ -206,6 +207,11 @@ CREATE TABLE IF NOT EXISTS run_cases (
   output_tokens BIGINT DEFAULT NULL,
   error_message TEXT DEFAULT NULL,
   logs LONGTEXT DEFAULT NULL,
+  runtime_snapshot_json JSON DEFAULT NULL,
+  inspect_eval_id VARCHAR(255) DEFAULT NULL,
+  inspect_sample_id VARCHAR(255) DEFAULT NULL,
+  usage_json JSON DEFAULT NULL,
+  artifacts_json JSON DEFAULT NULL,
   started_at TIMESTAMP NULL DEFAULT NULL,
   finished_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -219,6 +225,20 @@ CREATE TABLE IF NOT EXISTS run_cases (
   CONSTRAINT uq_run_case_attempt UNIQUE (experiment_id, data_item_id, attempt_no),
   INDEX idx_run_cases_experiment_latest_status (experiment_id, is_latest, status),
   INDEX idx_run_cases_experiment_created (experiment_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS run_case_scores (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  run_case_id BIGINT UNSIGNED NOT NULL,
+  scorer_key VARCHAR(255) NOT NULL,
+  score DOUBLE NOT NULL,
+  reason TEXT NOT NULL,
+  raw_result_json JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_run_case_scores_run_case
+    FOREIGN KEY (run_case_id) REFERENCES run_cases(id) ON DELETE CASCADE,
+  INDEX idx_run_case_scores_run_case (run_case_id),
+  INDEX idx_run_case_scores_scorer (scorer_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS evaluate_results (

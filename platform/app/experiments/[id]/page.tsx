@@ -159,15 +159,14 @@ export default async function ExperimentDetailPage({
       [id]
     ),
     dbQuery<{ evaluator_name: string; avg_score: number | null; count_num: number | string }>(
-      `SELECT ev.name AS evaluator_name,
-              AVG(er.score) AS avg_score,
+      `SELECT rcs.scorer_key AS evaluator_name,
+              AVG(rcs.score) AS avg_score,
               COUNT(*) AS count_num
-       FROM evaluate_results er
-       JOIN run_cases rc ON rc.id = er.run_case_id
-       JOIN evaluators ev ON ev.id = er.evaluator_id
+       FROM run_case_scores rcs
+       JOIN run_cases rc ON rc.id = rcs.run_case_id
        WHERE rc.experiment_id = $1 AND rc.is_latest = TRUE
-       GROUP BY ev.name
-       ORDER BY ev.name ASC`,
+       GROUP BY rcs.scorer_key
+       ORDER BY rcs.scorer_key ASC`,
       [id]
     ),
     Number.isInteger(selectedCaseId) && selectedCaseId > 0
@@ -203,11 +202,10 @@ export default async function ExperimentDetailPage({
       : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<never>; rowCount: number }),
     Number.isInteger(selectedCaseId) && selectedCaseId > 0
       ? dbQuery<{ evaluator_name: string; score: number; reason: string }>(
-          `SELECT ev.name AS evaluator_name, er.score, er.reason
-           FROM evaluate_results er
-           JOIN evaluators ev ON ev.id = er.evaluator_id
-           WHERE er.run_case_id = $1
-           ORDER BY ev.name ASC`,
+          `SELECT rcs.scorer_key AS evaluator_name, rcs.score, rcs.reason
+           FROM run_case_scores rcs
+           WHERE rcs.run_case_id = $1
+           ORDER BY rcs.scorer_key ASC`,
           [selectedCaseId]
         )
       : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ evaluator_name: string; score: number; reason: string }>; rowCount: number }),
@@ -376,7 +374,7 @@ export default async function ExperimentDetailPage({
                         href={`${baseHref}${baseHref.includes("?") ? "&" : "?"}panel=case&caseId=${row.id}`}
                         className="text-btn"
                       >
-                        详情
+                        更新
                       </Link>
                     </td>
                   </tr>

@@ -321,7 +321,7 @@ export default async function DatasetDetailPage({
                           }
                           className="text-btn"
                         >
-                          详情
+                          更新
                         </Link>
                         <form action={deleteItem}>
                           <input type="hidden" name="id" value={item.id} />

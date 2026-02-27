@@ -53,7 +53,9 @@
 - 所有 schema 变更必须同时更新：
 - `db/init.mysql.sql`
 - `db/init.postgres.sql`
+- 任意 `lib/**/*.ts` 中涉及数据库字段/类型/契约的改动，必须同批更新上述两份 init SQL。
 - 若已有线上/本地存量库，提供对应 SQL 迁移命令（ALTER/MIGRATION）。
+- 对线上库执行的 ALTER/MIGRATION 必须回写到 init SQL，确保重建库一致。
 - 禁止只改代码不改 init SQL，避免重建数据库后结构不一致。
 
 ## 7) Experiment And Run Semantics

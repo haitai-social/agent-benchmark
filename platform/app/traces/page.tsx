@@ -282,7 +282,7 @@ export default async function TracesPage({
                       href={`${listHref}${listHref.includes("?") ? "&" : "?"}panel=detail&id=${row.id}`}
                       className="text-btn"
                     >
-                      详情
+                      更新
                     </Link>
                     <form action={deleteTrace}>
                       <input type="hidden" name="id" value={row.id} />

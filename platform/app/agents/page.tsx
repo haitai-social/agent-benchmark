@@ -2,56 +2,34 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
-import { parseJsonOrWrap } from "@/lib/safe-json";
 import { requireUser } from "@/lib/supabase-auth";
 import { AgentIcon, FilterIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
 import { TextareaWithFileUpload } from "../components/textarea-with-file-upload";
 
-const defaultOpenApiSpec = {
-  openapi: "3.1.0",
-  info: { title: "Agent Runtime API", version: "1.0.0" },
-  paths: {
-    "/run": {
-      post: {
-        "x-benchmark-operation": "run",
-        summary: "Run agent with session + input",
-        requestBody: {
-          required: true,
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                required: ["session_jsonl", "user_input"],
-                properties: {
-                  session_jsonl: { type: "string" },
-                  user_input: { type: "string" }
-                }
-              }
-            }
-          }
-        },
-        responses: {
-          "200": {
-            description: "trajectory and output",
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["trajectory", "output"],
-                  properties: {
-                    trajectory: {},
-                    output: {}
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+const defaultRuntimeSpec = {
+  runtime_type: "agno_docker",
+  agent_image: "ghcr.io/example/agno-agent@sha256:replace-me",
+  agent_command: "",
+  agent_env_template: {},
+  sandbox: { timeout_seconds: 180 },
+  services: [],
+  scorers: [{ scorer_key: "task_success" }]
 };
+
+type RuntimeSpec = {
+  runtime_type?: string;
+  agent_image?: string;
+  services?: unknown[];
+  scorers?: unknown[];
+};
+
+function parseRuntimeSpec(value: unknown): RuntimeSpec {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as RuntimeSpec;
+}
 
 function buildListHref(q: string, status: string, keyLike: string) {
   const params = new URLSearchParams();
@@ -59,6 +37,12 @@ function buildListHref(q: string, status: string, keyLike: string) {
   if (status !== "all") params.set("status", status);
   if (keyLike) params.set("keyLike", keyLike);
   return params.size > 0 ? `/agents?${params.toString()}` : "/agents";
+}
+
+function buildErrorHref(q: string, status: string, keyLike: string, errorMessage: string) {
+  const base = buildListHref(q, status, keyLike);
+  const joiner = base.includes("?") ? "&" : "?";
+  return `${base}${joiner}error=${encodeURIComponent(errorMessage)}`;
 }
 
 async function createAgent(formData: FormData) {
@@ -69,27 +53,38 @@ async function createAgent(formData: FormData) {
   const version = String(formData.get("version") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
-  const dockerImage = String(formData.get("dockerImage") ?? "").trim();
-  const openapiSpecRaw = String(formData.get("openapiSpec") ?? "{}");
-  const metadataRaw = String(formData.get("metadata") ?? "{}");
+  const runtimeSpecRaw = String(formData.get("runtimeSpec") ?? "{}");
   const q = String(formData.get("q") ?? "").trim();
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
 
-  if (!agentKey || !version || !name || !dockerImage) return;
+  let runtimeSpec: Record<string, unknown>;
+  try {
+    runtimeSpec = JSON.parse(runtimeSpecRaw) as Record<string, unknown>;
+  } catch {
+    redirect(buildErrorHref(q, status, keyLike, "Runtime Spec 必须是合法 JSON"));
+  }
+  if (!runtimeSpec || typeof runtimeSpec !== "object" || Array.isArray(runtimeSpec)) {
+    redirect(buildErrorHref(q, status, keyLike, "Runtime Spec 必须是 JSON 对象"));
+  }
+  const dockerImage = String(runtimeSpec.agent_image ?? "").trim();
+  if (!agentKey || !version || !name || !dockerImage) {
+    redirect(buildErrorHref(q, status, keyLike, "请填写 name/agentKey/version，且 Runtime Spec 必须包含 agent_image"));
+  }
 
   await dbQuery(
-    `INSERT INTO agents (agent_key, version, name, description, docker_image, openapi_spec, status, metadata, created_by, updated_by, updated_at)
-     SELECT $1, $2, $3, $4, $5, $6, 'active', $7, $8, $8, CURRENT_TIMESTAMP
-     WHERE NOT EXISTS (SELECT 1 FROM agents WHERE agent_key = $9 AND version = $10 AND deleted_at IS NULL)`,
+    `INSERT INTO agents (agent_key, version, name, description, docker_image, openapi_spec, status, metadata, runtime_spec_json, created_by, updated_by, updated_at)
+     SELECT $1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $9, CURRENT_TIMESTAMP
+     WHERE NOT EXISTS (SELECT 1 FROM agents WHERE agent_key = $10 AND version = $11 AND deleted_at IS NULL)`,
     [
       agentKey,
       version,
       name,
       description,
       dockerImage,
-      JSON.stringify(parseJsonOrWrap(openapiSpecRaw)),
-      JSON.stringify(parseJsonOrWrap(metadataRaw)),
+      JSON.stringify({}),
+      JSON.stringify({}),
+      JSON.stringify(runtimeSpec),
       user.id,
       agentKey,
       version
@@ -110,15 +105,25 @@ async function updateAgent(formData: FormData) {
   const version = String(formData.get("version") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
-  const dockerImage = String(formData.get("dockerImage") ?? "").trim();
-  const openapiSpecRaw = String(formData.get("openapiSpec") ?? "{}");
-  const metadataRaw = String(formData.get("metadata") ?? "{}");
+  const runtimeSpecRaw = String(formData.get("runtimeSpec") ?? "{}");
   const statusValue = String(formData.get("status") ?? "active").trim();
   const q = String(formData.get("q") ?? "").trim();
   const statusFilter = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
 
-  if (!idRaw || !Number.isInteger(id) || id <= 0 || !agentKey || !version || !name || !dockerImage) return;
+  let runtimeSpec: Record<string, unknown>;
+  try {
+    runtimeSpec = JSON.parse(runtimeSpecRaw) as Record<string, unknown>;
+  } catch {
+    redirect(buildErrorHref(q, statusFilter, keyLike, "Runtime Spec 必须是合法 JSON"));
+  }
+  if (!runtimeSpec || typeof runtimeSpec !== "object" || Array.isArray(runtimeSpec)) {
+    redirect(buildErrorHref(q, statusFilter, keyLike, "Runtime Spec 必须是 JSON 对象"));
+  }
+  const dockerImage = String(runtimeSpec.agent_image ?? "").trim();
+  if (!idRaw || !Number.isInteger(id) || id <= 0 || !agentKey || !version || !name || !dockerImage) {
+    redirect(buildErrorHref(q, statusFilter, keyLike, "更新失败：请填写完整字段，且 Runtime Spec 必须包含 agent_image"));
+  }
 
   await dbQuery(
     `UPDATE agents
@@ -127,24 +132,12 @@ async function updateAgent(formData: FormData) {
          name = $4,
          description = $5,
          docker_image = $6,
-         openapi_spec = $7,
-         metadata = $8,
-         status = $9,
-         updated_by = $10,
+         runtime_spec_json = $7,
+         status = $8,
+         updated_by = $9,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND deleted_at IS NULL`,
-    [
-      id,
-      agentKey,
-      version,
-      name,
-      description,
-      dockerImage,
-      JSON.stringify(parseJsonOrWrap(openapiSpecRaw)),
-      JSON.stringify(parseJsonOrWrap(metadataRaw)),
-      statusValue || "active",
-      user.id
-    ]
+    [id, agentKey, version, name, description, dockerImage, JSON.stringify(runtimeSpec), statusValue || "active", user.id]
   );
 
   revalidatePath("/agents");
@@ -190,11 +183,11 @@ async function deleteAgent(formData: FormData) {
 export default async function AgentsPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; status?: string; keyLike?: string; panel?: string; id?: string }>;
+  searchParams: Promise<{ q?: string; status?: string; keyLike?: string; panel?: string; id?: string; error?: string }>;
 }) {
   await requireUser();
 
-  const { q = "", status = "all", keyLike = "", panel = "none", id = "" } = await searchParams;
+  const { q = "", status = "all", keyLike = "", panel = "none", id = "", error = "" } = await searchParams;
   const filters = { q: q.trim(), status: status.trim() || "all", keyLike: keyLike.trim() };
   const creating = panel === "create";
   const filtering = panel === "filter";
@@ -207,13 +200,11 @@ export default async function AgentsPage({
     version: string;
     name: string;
     description: string;
-    docker_image: string;
-    openapi_spec: unknown;
+    runtime_spec_json: RuntimeSpec | null;
     status: string;
-    metadata: unknown;
     updated_at: string;
   }>(
-    `SELECT id, agent_key, version, name, description, docker_image, openapi_spec, status, metadata, updated_at
+    `SELECT id, agent_key, version, name, description, runtime_spec_json, status, updated_at
      FROM agents
      WHERE ($1 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(version) LIKE CONCAT('%', LOWER($4), '%'))
        AND deleted_at IS NULL
@@ -270,6 +261,11 @@ export default async function AgentsPage({
           </Link>
         </section>
       ) : null}
+      {error ? (
+        <section className="card">
+          <div style={{ color: "#b42318", fontWeight: 600 }}>{error}</div>
+        </section>
+      ) : null}
 
       <section className="card table-card">
         <div className="section-title-row">
@@ -286,21 +282,29 @@ export default async function AgentsPage({
             <tr>
               <th>名称</th>
               <th>Key / Version</th>
-              <th>Docker Image</th>
+              <th>Runtime</th>
               <th>Status</th>
               <th>更新时间</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {rows.map((row) => {
+              const runtime = parseRuntimeSpec(row.runtime_spec_json);
+              const servicesCount = Array.isArray(runtime.services) ? runtime.services.length : 0;
+              const scorersCount = Array.isArray(runtime.scorers) ? runtime.scorers.length : 0;
+              return (
               <tr key={row.id}>
                 <td>{row.name}</td>
                 <td>
                   <div><code>{row.agent_key}</code></div>
                   <div className="muted"><code>{row.version}</code></div>
                 </td>
-                <td><code>{row.docker_image}</code></td>
+                <td>
+                  <div><code>{runtime.runtime_type ?? "-"}</code></div>
+                  <div className="muted"><code>{runtime.agent_image ?? "-"}</code></div>
+                  <div className="muted">{`services:${servicesCount} scorers:${scorersCount}`}</div>
+                </td>
                 <td>
                   <span className={`status-pill ${row.status}`}>{row.status}</span>
                 </td>
@@ -315,7 +319,7 @@ export default async function AgentsPage({
                       }
                       className="text-btn"
                     >
-                      详情
+                      更新
                     </Link>
                     <form action={deleteAgent}>
                       <input type="hidden" name="id" value={row.id} />
@@ -329,7 +333,8 @@ export default async function AgentsPage({
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </section>
@@ -420,14 +425,6 @@ export default async function AgentsPage({
 
                 <div className="field-group">
                   <label className="field-head">
-                    <span className="field-title required">Docker Image</span>
-                    <span className="type-pill">Image</span>
-                  </label>
-                  <input name="dockerImage" placeholder="例如 ghcr.io/org/openclaw:v2026.02.26" required defaultValue={editing?.docker_image ?? ""} />
-                </div>
-
-                <div className="field-group">
-                  <label className="field-head">
                     <span className="field-title">Status</span>
                     <span className="type-pill">Enum</span>
                   </label>
@@ -451,31 +448,19 @@ export default async function AgentsPage({
 
                 <div className="field-group">
                   <label className="field-head">
-                    <span className="field-title required">OpenAPI Spec (JSON)</span>
+                    <span className="field-title required">Runtime Spec (JSON)</span>
                     <span className="type-pill">JSON</span>
                   </label>
                   <TextareaWithFileUpload
-                    name="openapiSpec"
+                    name="runtimeSpec"
                     required
                     accept=".json,.yaml,.yml,.txt"
-                    hint="支持粘贴或上传 OpenAPI 文件"
+                    hint="统一运行配置（runtime_type / agent_image / sandbox / services / scorers）"
                     defaultValue={
-                      editing?.openapi_spec
-                        ? JSON.stringify(editing.openapi_spec, null, 2)
-                        : JSON.stringify(defaultOpenApiSpec, null, 2)
+                      editing?.runtime_spec_json
+                        ? JSON.stringify(editing.runtime_spec_json, null, 2)
+                        : JSON.stringify(defaultRuntimeSpec, null, 2)
                     }
-                  />
-                </div>
-
-                <div className="field-group">
-                  <label className="field-head">
-                    <span className="field-title">Metadata (JSON)</span>
-                    <span className="type-pill">Optional</span>
-                  </label>
-                  <TextareaWithFileUpload
-                    name="metadata"
-                    accept=".json,.txt"
-                    defaultValue={editing?.metadata ? JSON.stringify(editing.metadata, null, 2) : "{}"}
                   />
                 </div>
 

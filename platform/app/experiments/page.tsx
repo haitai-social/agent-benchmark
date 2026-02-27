@@ -357,6 +357,9 @@ export default async function ExperimentsPage({
                 <td>
                   <div className="row-actions">
                     <Link href={`${listHref}${listHref.includes("?") ? "&" : "?"}id=${e.id}`} className="text-btn">
+                      更新
+                    </Link>
+                    <Link href={`/experiments/${e.id}`} className="text-btn">
                       详情
                     </Link>
                     <form action={deleteExperiment}>
