@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "typecheck": "echo 'consumer not implemented yet'"
+    "build": "python -m compileall src",
+    "test": "PYTHONPATH=src python -m pytest tests -q",
+    "start": "PYTHONPATH=src python -m consumer.main",
+    "typecheck": "python -m py_compile src/consumer/*.py"
   }
 }
