@@ -2,7 +2,6 @@ import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
 import { PaginationControls } from "@/app/components/pagination-controls";
 import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
-import { ingestTracePayload } from "@/lib/otel";
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
 import { parseSelectedIds } from "@/lib/form-ids";
 import { parseJsonOrWrap } from "@/lib/safe-json";
@@ -11,7 +10,6 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
   FilterIcon,
-  PlusIcon,
   RefreshIcon,
   SearchIcon,
   TraceIcon
@@ -37,34 +35,6 @@ function toDatetimeLocal(value: string | null) {
   if (Number.isNaN(date.getTime())) return "";
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
-}
-
-async function ingestManualTrace(formData: FormData) {
-  "use server";
-  await requireUser();
-
-  const payloadRaw = String(formData.get("payload") ?? "{}");
-  const q = String(formData.get("q") ?? "").trim();
-  const service = String(formData.get("service") ?? "all").trim() || "all";
-  const page = parsePage(String(formData.get("page") ?? "1"));
-  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
-  const nextParams = new URLSearchParams();
-  if (q) nextParams.set("q", q);
-  if (service !== "all") nextParams.set("service", service);
-  if (page > 1) nextParams.set("page", String(page));
-  if (pageSize !== 10) nextParams.set("pageSize", String(pageSize));
-  nextParams.set("panel", "ingest");
-  try {
-    const payload = JSON.parse(payloadRaw) as Record<string, unknown>;
-    const inserted = await ingestTracePayload(payload);
-    nextParams.set("result", "ok");
-    nextParams.set("inserted", String(inserted));
-  } catch (error) {
-    nextParams.set("result", "error");
-    nextParams.set("message", error instanceof Error ? error.message : "invalid payload");
-  }
-  revalidatePath("/traces");
-  redirect(`/traces?${nextParams.toString()}`);
 }
 
 async function updateTrace(formData: FormData) {
@@ -173,15 +143,14 @@ async function bulkDeleteTrace(formData: FormData) {
 export default async function TracesPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; service?: string; panel?: string; id?: string; result?: string; inserted?: string; message?: string; page?: string; pageSize?: string }>;
+  searchParams: Promise<{ q?: string; service?: string; panel?: string; id?: string; page?: string; pageSize?: string }>;
 }) {
   await requireUser();
 
-  const { q = "", service = "all", panel = "none", id = "", result = "", inserted = "", message = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
+  const { q = "", service = "all", panel = "none", id = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
   const qv = q.trim();
   const pageSize = parsePageSize(pageSizeRaw);
   const requestedPage = parsePage(pageRaw);
-  const ingesting = panel === "ingest";
   const detailIdRaw = id.trim();
   const detailId = detailIdRaw ? Number(detailIdRaw) : 0;
   const countResult = await dbQuery<{ total_count: number | string }>(
@@ -196,7 +165,6 @@ export default async function TracesPage({
   const page = clampPage(requestedPage, total, pageSize);
   const offset = getOffset(page, pageSize);
   const listHref = buildListHref(qv, service, page, pageSize);
-  const ingestHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=ingest`;
 
   const [traces, serviceRows, detailTraceRows] = await Promise.all([
     dbQuery<{
@@ -258,7 +226,7 @@ export default async function TracesPage({
       <section className="page-hero">
         <div className="breadcrumb">评测 &nbsp;/&nbsp; Trace</div>
         <h1>Trace</h1>
-        <p className="muted">接收 OpenTelemetry 数据并用于 trajectory 选择与回放。</p>
+        <p className="muted">用于 trajectory 选择与回放。</p>
       </section>
 
       <section className="toolbar-row">
@@ -290,9 +258,6 @@ export default async function TracesPage({
           <a href={listHref || "/traces"} className="icon-btn" aria-label="刷新">
             <RefreshIcon width={16} height={16} />
           </a>
-          <Link href={ingestHref} className="primary-btn">
-            <PlusIcon width={16} height={16} /> 手动上报
-          </Link>
         </div>
       </section>
 
@@ -302,9 +267,6 @@ export default async function TracesPage({
             <TraceIcon width={16} height={16} />
             Trace 列表
           </h2>
-          <span className="toolbar-hint">
-            OTel Endpoint: <code>POST /api/otel/v1/traces</code>
-          </span>
         </div>
         <form id={bulkDeleteFormId} action={bulkDeleteTrace}>
           <input type="hidden" name="q" value={qv} />
@@ -487,67 +449,7 @@ export default async function TracesPage({
         </div>
       ) : null}
 
-      {ingesting ? (
-        <div className="action-overlay">
-          <Link href={listHref || "/traces"} className="action-overlay-dismiss" aria-label="关闭抽屉蒙层" />
-          <aside className="action-drawer">
-            <div className="action-drawer-header">
-              <h3>手动上报 Trace</h3>
-              <Link href={listHref || "/traces"} className="icon-btn" aria-label="关闭">
-                <span style={{ fontSize: 18, lineHeight: 1 }}>×</span>
-              </Link>
-            </div>
-            <div className="action-drawer-body">
-              {result === "ok" ? (
-                <p className="muted" style={{ color: "#0f766e" }}>
-                  写入成功，新增 {inserted || "0"} 条 spans。
-                </p>
-              ) : null}
-              {result === "error" ? (
-                <p className="muted" style={{ color: "#b91c1c" }}>
-                  写入失败：{message || "invalid payload"}
-                </p>
-              ) : null}
-              <form action={ingestManualTrace} className="menu-form form-tone-green">
-                <input type="hidden" name="q" value={qv} />
-                <input type="hidden" name="service" value={service} />
-                <input type="hidden" name="page" value={page} />
-                <input type="hidden" name="pageSize" value={pageSize} />
-                <div className="field-group">
-                  <label className="field-head">
-                    <span className="field-title required">Payload JSON</span>
-                    <span className="type-pill">JSON</span>
-                  </label>
-                  <TextareaWithFileUpload
-                    name="payload"
-                    required
-                    accept=".json,.txt"
-                    defaultValue={JSON.stringify(
-                      {
-                        spans: [
-                          {
-                            traceId: "demo-trace",
-                            spanId: "demo-span",
-                            name: "benchmark.run",
-                            serviceName: "benchmark-platform",
-                            attributes: { env: "test" },
-                            status: "OK",
-                            startTime: new Date().toISOString(),
-                            endTime: new Date().toISOString()
-                          }
-                        ]
-                      },
-                      null,
-                      2
-                    )}
-                  />
-                </div>
-                <SubmitButton className="primary-btn" pendingText="写入中...">写入 Trace</SubmitButton>
-              </form>
-            </div>
-          </aside>
-        </div>
-      ) : null}
+      
     </div>
   );
 }

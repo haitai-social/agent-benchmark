@@ -17,8 +17,6 @@ from domain.parser import parse_message
 from infrastructure.config import load_settings
 from infrastructure.db_repository import DbRepository
 from infrastructure.docker_runner import DockerRunner
-from infrastructure.otel_collector import OTelCollectorServer, OTelSpanStore
-from infrastructure.trace_repository import TraceIngestRepository, TraceRepository
 from runtime.inspect_runner import InspectRunner
 
 logging.basicConfig(
@@ -264,33 +262,12 @@ def _run_direct(message_payload: dict[str, Any]) -> None:
         run_timeout_seconds=settings.docker_run_timeout_seconds,
         inspect_timeout_seconds=settings.docker_inspect_timeout_seconds,
     )
-
-    collector: OTelCollectorServer | None = None
-    if settings.otel_enabled and settings.otel_collector_enabled:
-        trace_sink = TraceIngestRepository.from_settings(settings)
-        span_store = OTelSpanStore(sink=trace_sink)
-        collector = OTelCollectorServer(
-            host=settings.otel_collector_host,
-            port=settings.otel_collector_port,
-            path=settings.otel_collector_path,
-            store=span_store,
-        )
-        trajectory_source = span_store
-    else:
-        trajectory_source = TraceRepository.from_settings(settings)
-
-    inspect_runner = InspectRunner(runner, settings=settings, trace_repository=trajectory_source)
+    inspect_runner = InspectRunner(runner, settings=settings)
     db = DbRepository.from_settings(settings)
     processor = MessageProcessor(settings=settings, runner=inspect_runner, lock=_NoopLock(), db=db)
 
     message = parse_message(message_payload)
-    if collector:
-        collector.start()
-    try:
-        processor._execute_cases(message)
-    finally:
-        if collector:
-            collector.stop()
+    processor._execute_cases(message)
 
 
 def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id: str) -> AcceptanceResult:

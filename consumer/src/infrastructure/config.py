@@ -22,15 +22,6 @@ class Settings:
     docker_pull_timeout_seconds: int
     docker_run_timeout_seconds: int
     docker_inspect_timeout_seconds: int
-    otel_enabled: bool
-    otel_endpoint: str | None
-    otel_query_timeout_seconds: int
-    otel_protocol: str
-    otel_collector_enabled: bool
-    otel_collector_host: str
-    otel_collector_port: int
-    otel_collector_path: str
-    otel_public_endpoint: str | None
     redis_host: str
     redis_port: int
     redis_username: str | None
@@ -135,15 +126,6 @@ def load_settings() -> Settings:
         docker_pull_timeout_seconds=_as_int("CONSUMER_DOCKER_PULL_TIMEOUT_SECONDS", 120),
         docker_run_timeout_seconds=_as_int("CONSUMER_DOCKER_RUN_TIMEOUT_SECONDS", 60),
         docker_inspect_timeout_seconds=_as_int("CONSUMER_DOCKER_INSPECT_TIMEOUT_SECONDS", 10),
-        otel_enabled=_as_bool("CONSUMER_OTEL_ENABLED", False),
-        otel_endpoint=os.getenv("CONSUMER_OTEL_ENDPOINT") or None,
-        otel_query_timeout_seconds=_as_int("CONSUMER_OTEL_QUERY_TIMEOUT_SECONDS", 10),
-        otel_protocol=os.getenv("CONSUMER_OTEL_PROTOCOL", "http/protobuf"),
-        otel_collector_enabled=_as_bool("CONSUMER_OTEL_COLLECTOR_ENABLED", True),
-        otel_collector_host=os.getenv("CONSUMER_OTEL_COLLECTOR_HOST", "0.0.0.0"),
-        otel_collector_port=_as_int("CONSUMER_OTEL_COLLECTOR_PORT", 14318),
-        otel_collector_path=os.getenv("CONSUMER_OTEL_COLLECTOR_PATH", "/v1/traces"),
-        otel_public_endpoint=os.getenv("CONSUMER_OTEL_PUBLIC_ENDPOINT") or None,
         redis_host=_must_env("REDIS_HOST"),
         redis_port=_as_int("REDIS_PORT", 6379),
         redis_username=os.getenv("REDIS_USERNAME") or None,

@@ -44,13 +44,6 @@ export default async function HomePage() {
         <p className="muted">3. 产出 trajectory + output 并由 Judge 评分</p>
       </section>
 
-      <section className="card">
-        <h2>OpenTelemetry 上报入口</h2>
-        <p className="muted">
-          Endpoint: <code>POST /api/otel/v1/traces</code>
-        </p>
-        <p className="muted">支持 OTLP JSON(resourceSpans) 与简化 spans JSON。</p>
-      </section>
     </div>
   );
 }

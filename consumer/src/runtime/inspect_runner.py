@@ -15,9 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
-from domain.otel_mapper import map_spans_to_trajectory
 from domain.contracts import CaseExecutionResult, ExperimentRunRequested, RunCaseInput
 from infrastructure.config import Settings
 from infrastructure.docker_runner import DockerRunner
@@ -42,13 +40,9 @@ class InspectRunner:
     for all run_cases. Each case executes in order and then issues a reset command.
     """
 
-    def __init__(self, docker_runner: DockerRunner, settings: Settings, trace_repository: Any) -> None:
+    def __init__(self, docker_runner: DockerRunner, settings: Settings) -> None:
         self.docker_runner = docker_runner
         self.settings = settings
-        self.trace_repository = trace_repository
-        self._otel_enabled = bool(settings.otel_enabled)
-        self._otel_endpoint = self._resolve_otel_endpoint(settings)
-        self._otel_query_timeout_seconds = max(1, int(settings.otel_query_timeout_seconds))
         self._scorer_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, int(settings.scorer_concurrent_cases)),
             thread_name_prefix="scorer",
@@ -62,12 +56,6 @@ class InspectRunner:
                 sys.executable,
                 max(1, int(settings.scorer_concurrent_cases)),
             )
-            if self._otel_enabled:
-                logger.info(
-                    "code=OTEL_ENABLED endpoint=%s query_timeout_seconds=%s",
-                    self._otel_endpoint,
-                    self._otel_query_timeout_seconds,
-                )
         else:
             logger.error(
                 "code=E_INSPECT_AI_UNAVAILABLE python=%s executable=%s err=%s",
@@ -212,7 +200,7 @@ class InspectRunner:
                 "latency_ms": 0,
                 "sandbox_connect_ms": 0,
                 "case_exec_ms": 0,
-                "otel_query_ms": 0,
+                "trajectory_resolve_ms": 0,
                 "scorer_total_ms": 0,
                 "scorer_timings_ms": {},
             }
@@ -296,17 +284,7 @@ class InspectRunner:
                     parsed = self._parse_agent_output(raw_logs)
                     output, trajectory = self._normalize_case_result_payload(parsed, exec_result.stdout)
                     case_finished_ms = int(time.time() * 1000)
-                    _update_progress("otel_query", run_case_id)
-                    otel_query_started = time.time()
-                    trajectory = self._resolve_trajectory(
-                        message=message,
-                        run_case=run_case,
-                        run_case_id=run_case_id,
-                        started_ms=case_started_ms,
-                        finished_ms=case_finished_ms,
-                        fallback_trajectory=trajectory,
-                    )
-                    execution[run_case_id]["otel_query_ms"] = int((time.time() - otel_query_started) * 1000)
+                    execution[run_case_id]["trajectory_resolve_ms"] = 0
                     logs = str(parsed.get("logs")) if parsed and parsed.get("logs") else raw_logs
                     if container_logs:
                         logs = f"{logs}\n\n[container]\n{container_logs}".strip()
@@ -544,7 +522,6 @@ class InspectRunner:
             case_result.usage["timings_ms"] = {
                 "sandbox_connect": int(rec.get("sandbox_connect_ms") or 0),
                 "case_exec": int(rec.get("case_exec_ms") or 0),
-                "otel_query": int(rec.get("otel_query_ms") or 0),
                 "scorer_total": int(rec.get("scorer_total_ms") or 0),
                 "total": int(rec.get("latency_ms") or 0),
                 "scorer_breakdown": rec.get("scorer_timings_ms") or {},
@@ -618,160 +595,7 @@ class InspectRunner:
             env["BENCHMARK_TRACE_ID"] = run_case.trace_id
         if mock_base_url:
             env["BENCHMARK_MOCK_BASE_URL"] = mock_base_url
-        if self._otel_enabled:
-            endpoint_base, traces_endpoint = self._otel_exporter_endpoints()
-            env["OTEL_SERVICE_NAME"] = self._otel_service_name(message)
-            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint_base
-            env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = traces_endpoint
-            env["OTEL_EXPORTER_OTLP_PROTOCOL"] = self.settings.otel_protocol
-            env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = self.settings.otel_protocol
-            env["OTEL_TRACES_EXPORTER"] = "otlp"
-            env["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(
-                [
-                    f"benchmark.experiment_id={message.experiment.id}",
-                    f"benchmark.run_case_id={run_case.run_case_id}",
-                    f"benchmark.data_item_id={run_case.data_item_id}",
-                    f"benchmark.agent_id={message.agent.id}",
-                ]
-            )
         return env
-
-    def _otel_service_name(self, message: ExperimentRunRequested) -> str:
-        if message.agent.name:
-            return message.agent.name
-        return f"{message.agent.agent_key}:{message.agent.version}"
-
-    def _resolve_otel_endpoint(self, settings: Settings) -> str:
-        explicit = str(settings.otel_public_endpoint or "").strip()
-        if explicit:
-            return explicit
-        if settings.otel_collector_enabled:
-            return f"http://host.docker.internal:{settings.otel_collector_port}{settings.otel_collector_path}"
-        fallback = str(settings.otel_endpoint or "").strip()
-        if fallback:
-            return fallback
-        return f"http://host.docker.internal:{settings.otel_collector_port}{settings.otel_collector_path}"
-
-    def _otel_exporter_endpoints(self) -> tuple[str, str]:
-        parsed = urlparse(self._otel_endpoint)
-        if parsed.scheme and parsed.netloc:
-            base = f"{parsed.scheme}://{parsed.netloc}"
-            path = parsed.path or "/v1/traces"
-            full = f"{base}{path}"
-            return base, full
-        return self._otel_endpoint, self._otel_endpoint
-
-    def _resolve_trajectory(
-        self,
-        *,
-        message: ExperimentRunRequested,
-        run_case: RunCaseInput,
-        run_case_id: int,
-        started_ms: int,
-        finished_ms: int,
-        fallback_trajectory: Any,
-    ) -> Any:
-        if not self._otel_enabled:
-            return fallback_trajectory
-        logger.info(
-            "code=OTEL_QUERY_START run_case_id=%s experiment_id=%s window_ms=%s-%s",
-            run_case_id,
-            message.experiment.id,
-            started_ms,
-            finished_ms,
-        )
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(
-                    self.trace_repository.fetch_spans_by_run_case,
-                    run_case_id=run_case_id,
-                    start_ms=started_ms,
-                    end_ms=finished_ms,
-                )
-                spans = future.result(timeout=self._otel_query_timeout_seconds)
-            if not spans:
-                fetch_window = getattr(self.trace_repository, "fetch_spans_by_time_window", None)
-                if callable(fetch_window):
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(
-                            fetch_window,
-                            start_ms=started_ms,
-                            end_ms=finished_ms,
-                            service_name=self._otel_service_name(message),
-                        )
-                        spans = future.result(timeout=self._otel_query_timeout_seconds)
-                    if spans:
-                        logger.info(
-                            "code=OTEL_QUERY_WINDOW_OK run_case_id=%s span_count=%s service_name=%s",
-                            run_case_id,
-                            len(spans),
-                            self._otel_service_name(message),
-                        )
-            if spans:
-                mapped = map_spans_to_trajectory(spans)
-                if mapped:
-                    logger.info("code=OTEL_QUERY_OK run_case_id=%s span_count=%s", run_case_id, len(spans))
-                    return mapped
-        except Exception as exc:
-            logger.warning("code=E_OTEL_QUERY_FAILED run_case_id=%s err=%s", run_case_id, exc)
-        synthetic = self._persist_synthetic_span(
-            message=message,
-            run_case=run_case,
-            started_ms=started_ms,
-            finished_ms=finished_ms,
-        )
-        if synthetic:
-            logger.info("code=OTEL_SYNTHETIC_SPAN_CREATED run_case_id=%s", run_case_id)
-            mapped = map_spans_to_trajectory([synthetic])
-            if mapped:
-                return mapped
-        logger.info("code=OTEL_FALLBACK_STDOUT run_case_id=%s", run_case_id)
-        return fallback_trajectory
-
-    def _persist_synthetic_span(
-        self,
-        *,
-        message: ExperimentRunRequested,
-        run_case: RunCaseInput,
-        started_ms: int,
-        finished_ms: int,
-    ) -> dict[str, Any] | None:
-        sink = getattr(self.trace_repository, "persist_spans", None)
-        if not callable(sink):
-            return None
-        now_ms = max(started_ms, finished_ms)
-        started = _iso_from_epoch_ms(started_ms or now_ms)
-        ended = _iso_from_epoch_ms(finished_ms or now_ms)
-        span = {
-            "trace_id": f"benchmark-{message.experiment.id}-{run_case.run_case_id}",
-            "span_id": uuid.uuid4().hex[:16],
-            "parent_span_id": None,
-            "name": "benchmark.case.exec",
-            "service_name": self._otel_service_name(message),
-            "attributes": {
-                "benchmark.synthetic": True,
-                "benchmark.experiment_id": message.experiment.id,
-                "benchmark.run_case_id": run_case.run_case_id,
-                "benchmark.data_item_id": run_case.data_item_id,
-                "benchmark.agent_id": message.agent.id,
-            },
-            "start_time": started,
-            "end_time": ended,
-            "status": "ok",
-            "raw": {
-                "name": "benchmark.case.exec",
-                "synthetic": True,
-                "start_time": started,
-                "end_time": ended,
-            },
-            "created_at": _iso_from_epoch_ms(now_ms),
-        }
-        try:
-            sink([span])
-            return span
-        except Exception as exc:
-            logger.warning("code=E_OTEL_SYNTHETIC_SPAN_FAILED run_case_id=%s err=%s", run_case.run_case_id, exc)
-            return None
 
     def _parse_agent_output(self, raw_logs: str) -> dict[str, Any] | None:
         lines = [line.strip() for line in raw_logs.splitlines() if line.strip()]
@@ -967,7 +791,3 @@ class InspectRunner:
                 return default
         return default
 
-
-def _iso_from_epoch_ms(value: int) -> str:
-    dt = datetime.fromtimestamp(max(0, value) / 1000.0, tz=timezone.utc)
-    return dt.isoformat()

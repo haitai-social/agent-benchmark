@@ -28,15 +28,6 @@
 - `CONSUMER_DOCKER_PULL_TIMEOUT_SECONDS`：pull 超时（default `120`）
 - `CONSUMER_DOCKER_RUN_TIMEOUT_SECONDS`：run 超时（default `60`）
 - `CONSUMER_DOCKER_INSPECT_TIMEOUT_SECONDS`：inspect 超时（default `10`）
-- `CONSUMER_OTEL_ENABLED`：是否开启 OTel 轨迹优先（default `false`）
-- `CONSUMER_OTEL_ENDPOINT`：OTel 上报地址（可选，不填则使用内建 collector）
-- `CONSUMER_OTEL_QUERY_TIMEOUT_SECONDS`：run_case 查询 traces 超时（default `10`）
-- `CONSUMER_OTEL_PROTOCOL`：OTel exporter 协议（default `http/protobuf`）
-- `CONSUMER_OTEL_COLLECTOR_ENABLED`：是否启用内建 collector（default `true`）
-- `CONSUMER_OTEL_COLLECTOR_HOST`：collector 监听地址（default `0.0.0.0`）
-- `CONSUMER_OTEL_COLLECTOR_PORT`：collector 端口（default `14318`）
-- `CONSUMER_OTEL_COLLECTOR_PATH`：collector 路径（default `/v1/traces`）
-- `CONSUMER_OTEL_PUBLIC_ENDPOINT`：注入容器的 OTel endpoint（default `http://host.docker.internal:14318/v1/traces`）
 
 ## Redis 去重锁配置（防重复消费）
 
@@ -69,22 +60,6 @@ Consumer 使用 `inspect_ai` 的 sandbox provider（`arcloop_docker`）管理容
 
 - `sandbox_start_command`：可选，默认使用镜像 CMD
 - `case_exec_command`：必填，必须是“一次执行并退出”的 case 命令
-
-## OTel 轨迹回收（MVP）
-
-当 `CONSUMER_OTEL_ENABLED=true` 时，consumer 在 case 执行时会：
-
-1. 向 agent 容器注入 OTel 环境变量（`OTEL_SERVICE_NAME`、`OTEL_RESOURCE_ATTRIBUTES` 等）。
-2. agent 将 spans 上报到内建 collector（或 `CONSUMER_OTEL_ENDPOINT`）。
-3. case 完成后，consumer 按 `benchmark.run_case_id` 从 collector 内存中查询 spans。
-4. 将 spans 映射为平台 trajectory 结构并写入 `run_cases.agent_trajectory`。
-5. 若 OTel 查询失败或无数据，回退 stdout JSON trajectory 解析。
-
-日志关键字：
-- `OTEL_QUERY_START`
-- `OTEL_QUERY_OK`
-- `E_OTEL_QUERY_FAILED`
-- `OTEL_FALLBACK_STDOUT`
 
 ## MockSideCar（Testcontainers）
 

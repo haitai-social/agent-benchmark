@@ -151,12 +151,11 @@ class MessageProcessor:
                 timings = (res.usage or {}).get("timings_ms") if isinstance(res.usage, dict) else None
                 if isinstance(timings, dict):
                     logger.info(
-                        "code=CASE_COMPLETED run_case_id=%s latency_ms=%s docker_start_ms=%s case_exec_ms=%s otel_query_ms=%s scorer_ms=%s",
+                        "code=CASE_COMPLETED run_case_id=%s latency_ms=%s docker_start_ms=%s case_exec_ms=%s scorer_ms=%s",
                         res.run_case_id,
                         res.latency_ms,
                         timings.get("sandbox_connect", 0),
                         timings.get("case_exec", 0),
-                        timings.get("otel_query", 0),
                         timings.get("scorer_total", 0),
                     )
                 else:

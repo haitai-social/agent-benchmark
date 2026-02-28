@@ -332,12 +332,11 @@ export default async function ExperimentDetailPage({
       return {
         sandboxConnect: Number(timings.sandbox_connect ?? 0),
         caseExec: Number(timings.case_exec ?? 0),
-        otelQuery: Number(timings.otel_query ?? 0),
         scorerTotal: Number(timings.scorer_total ?? 0),
         total: Number(timings.total ?? 0)
       };
     })
-    .filter((item): item is { sandboxConnect: number; caseExec: number; otelQuery: number; scorerTotal: number; total: number } => {
+    .filter((item): item is { sandboxConnect: number; caseExec: number; scorerTotal: number; total: number } => {
       return !!item && Number.isFinite(item.total);
     });
   const avgTiming = timingRows.length
@@ -345,13 +344,12 @@ export default async function ExperimentDetailPage({
         (acc, item) => ({
           sandboxConnect: acc.sandboxConnect + item.sandboxConnect,
           caseExec: acc.caseExec + item.caseExec,
-          otelQuery: acc.otelQuery + item.otelQuery,
           scorerTotal: acc.scorerTotal + item.scorerTotal,
           total: acc.total + item.total
         }),
-        { sandboxConnect: 0, caseExec: 0, otelQuery: 0, scorerTotal: 0, total: 0 }
+        { sandboxConnect: 0, caseExec: 0, scorerTotal: 0, total: 0 }
       )
-    : { sandboxConnect: 0, caseExec: 0, otelQuery: 0, scorerTotal: 0, total: 0 };
+    : { sandboxConnect: 0, caseExec: 0, scorerTotal: 0, total: 0 };
   const avgTimingDivisor = timingRows.length > 0 ? timingRows.length : 1;
 
   return (
@@ -529,7 +527,6 @@ export default async function ExperimentDetailPage({
               {[
                 { label: "Docker 启动", value: formatLatencyMs(avgTiming.sandboxConnect / avgTimingDivisor) },
                 { label: "Case 执行", value: formatLatencyMs(avgTiming.caseExec / avgTimingDivisor) },
-                { label: "OTel 查询", value: formatLatencyMs(avgTiming.otelQuery / avgTimingDivisor) },
                 { label: "Scoring", value: formatLatencyMs(avgTiming.scorerTotal / avgTimingDivisor) },
                 { label: "总耗时", value: formatLatencyMs(avgTiming.total / avgTimingDivisor) }
               ].map((item) => (
@@ -745,7 +742,6 @@ export default async function ExperimentDetailPage({
                   return [
                     `Docker ${formatLatencyMs(Number(timings.sandbox_connect ?? 0))}`,
                     `Run ${formatLatencyMs(Number(timings.case_exec ?? 0))}`,
-                    `OTel ${formatLatencyMs(Number(timings.otel_query ?? 0))}`,
                     `Score ${formatLatencyMs(Number(timings.scorer_total ?? 0))}`,
                     `Total ${formatLatencyMs(Number(timings.total ?? 0))}`
                   ].join(" | ");
