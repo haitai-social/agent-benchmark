@@ -23,6 +23,8 @@ export type Evaluator = {
   prompt_template: string;
   base_url: string;
   model_name: string;
+  api_style: string;
+  api_key: string;
 };
 
 export type Agent = {

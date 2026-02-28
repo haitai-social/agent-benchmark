@@ -52,7 +52,7 @@ function heuristicScore(key: string, input: JudgeInput): JudgeResult {
 }
 
 async function openAiJudge(evaluator: Evaluator, input: JudgeInput): Promise<JudgeResult | null> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = evaluator.api_key || process.env.OPENAI_API_KEY;
   const model = evaluator.model_name || process.env.JUDGE_MODEL || "gpt-4.1-mini";
   const baseUrl = (evaluator.base_url || "https://api.openai.com/v1").replace(/\/+$/, "");
   if (!apiKey) return null;
@@ -101,7 +101,7 @@ async function openAiJudge(evaluator: Evaluator, input: JudgeInput): Promise<Jud
 
 export async function listEvaluatorsForExperiment(experimentId: number) {
   const { rows } = await dbQuery<Evaluator>(
-    `SELECT ev.id, ev.evaluator_key, ev.name, ev.prompt_template, ev.base_url, ev.model_name
+    `SELECT ev.id, ev.evaluator_key, ev.name, ev.prompt_template, ev.base_url, ev.model_name, ev.api_style, ev.api_key
      FROM experiment_evaluators ee
      JOIN evaluators ev ON ev.id = ee.evaluator_id
      JOIN experiments e ON e.id = ee.experiment_id
