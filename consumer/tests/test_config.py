@@ -17,6 +17,15 @@ def test_load_settings(monkeypatch) -> None:
     assert settings.redis_host == "127.0.0.1"
     assert settings.redis_processing_lock_ttl_seconds == 300
     assert settings.redis_processed_ttl_seconds == 86400
+    assert settings.otel_enabled is False
+    assert settings.otel_query_timeout_seconds == 10
+    monkeypatch.setenv("CONSUMER_OTEL_ENABLED", "true")
+    monkeypatch.setenv("CONSUMER_OTEL_PUBLIC_ENDPOINT", "http://host.docker.internal:4318/v1/traces")
+    monkeypatch.setenv("CONSUMER_OTEL_COLLECTOR_ENABLED", "true")
+    settings = load_settings()
+    assert settings.otel_enabled is True
+    assert settings.otel_public_endpoint == "http://host.docker.internal:4318/v1/traces"
+    assert settings.otel_collector_enabled is True
     os.environ.pop("RABBITMQ_HOST", None)
     os.environ.pop("RABBITMQ_USER", None)
     os.environ.pop("RABBITMQ_PASSWORD", None)

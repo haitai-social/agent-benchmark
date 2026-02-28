@@ -2,6 +2,10 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { PaginationControls } from "@/app/components/pagination-controls";
+import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
+import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
+import { parseSelectedIds } from "@/lib/form-ids";
 import { requireUser } from "@/lib/supabase-auth";
 import { AgentIcon, FilterIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
@@ -31,16 +35,18 @@ function parseRuntimeSpec(value: unknown): RuntimeSpec {
   return value as RuntimeSpec;
 }
 
-function buildListHref(q: string, status: string, keyLike: string) {
+function buildListHref(q: string, status: string, keyLike: string, page: number, pageSize: number) {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (status !== "all") params.set("status", status);
   if (keyLike) params.set("keyLike", keyLike);
+  if (page > 1) params.set("page", String(page));
+  if (pageSize !== 10) params.set("pageSize", String(pageSize));
   return params.size > 0 ? `/agents?${params.toString()}` : "/agents";
 }
 
-function buildErrorHref(q: string, status: string, keyLike: string, errorMessage: string) {
-  const base = buildListHref(q, status, keyLike);
+function buildErrorHref(q: string, status: string, keyLike: string, page: number, pageSize: number, errorMessage: string) {
+  const base = buildListHref(q, status, keyLike, page, pageSize);
   const joiner = base.includes("?") ? "&" : "?";
   return `${base}${joiner}error=${encodeURIComponent(errorMessage)}`;
 }
@@ -57,19 +63,21 @@ async function createAgent(formData: FormData) {
   const q = String(formData.get("q") ?? "").trim();
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   let runtimeSpec: Record<string, unknown>;
   try {
     runtimeSpec = JSON.parse(runtimeSpecRaw) as Record<string, unknown>;
   } catch {
-    redirect(buildErrorHref(q, status, keyLike, "Runtime Spec 必须是合法 JSON"));
+    redirect(buildErrorHref(q, status, keyLike, page, pageSize, "Runtime Spec 必须是合法 JSON"));
   }
   if (!runtimeSpec || typeof runtimeSpec !== "object" || Array.isArray(runtimeSpec)) {
-    redirect(buildErrorHref(q, status, keyLike, "Runtime Spec 必须是 JSON 对象"));
+    redirect(buildErrorHref(q, status, keyLike, page, pageSize, "Runtime Spec 必须是 JSON 对象"));
   }
   const dockerImage = String(runtimeSpec.agent_image ?? "").trim();
   if (!agentKey || !version || !name || !dockerImage) {
-    redirect(buildErrorHref(q, status, keyLike, "请填写 name/agentKey/version，且 Runtime Spec 必须包含 agent_image"));
+    redirect(buildErrorHref(q, status, keyLike, page, pageSize, "请填写 name/agentKey/version，且 Runtime Spec 必须包含 agent_image"));
   }
 
   await dbQuery(
@@ -92,7 +100,7 @@ async function createAgent(formData: FormData) {
   );
 
   revalidatePath("/agents");
-  redirect(buildListHref(q, status, keyLike));
+  redirect(buildListHref(q, status, keyLike, page, pageSize));
 }
 
 async function updateAgent(formData: FormData) {
@@ -110,19 +118,21 @@ async function updateAgent(formData: FormData) {
   const q = String(formData.get("q") ?? "").trim();
   const statusFilter = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   let runtimeSpec: Record<string, unknown>;
   try {
     runtimeSpec = JSON.parse(runtimeSpecRaw) as Record<string, unknown>;
   } catch {
-    redirect(buildErrorHref(q, statusFilter, keyLike, "Runtime Spec 必须是合法 JSON"));
+    redirect(buildErrorHref(q, statusFilter, keyLike, page, pageSize, "Runtime Spec 必须是合法 JSON"));
   }
   if (!runtimeSpec || typeof runtimeSpec !== "object" || Array.isArray(runtimeSpec)) {
-    redirect(buildErrorHref(q, statusFilter, keyLike, "Runtime Spec 必须是 JSON 对象"));
+    redirect(buildErrorHref(q, statusFilter, keyLike, page, pageSize, "Runtime Spec 必须是 JSON 对象"));
   }
   const dockerImage = String(runtimeSpec.agent_image ?? "").trim();
   if (!idRaw || !Number.isInteger(id) || id <= 0 || !agentKey || !version || !name || !dockerImage) {
-    redirect(buildErrorHref(q, statusFilter, keyLike, "更新失败：请填写完整字段，且 Runtime Spec 必须包含 agent_image"));
+    redirect(buildErrorHref(q, statusFilter, keyLike, page, pageSize, "更新失败：请填写完整字段，且 Runtime Spec 必须包含 agent_image"));
   }
 
   await dbQuery(
@@ -141,7 +151,7 @@ async function updateAgent(formData: FormData) {
   );
 
   revalidatePath("/agents");
-  redirect(buildListHref(q, statusFilter, keyLike));
+  redirect(buildListHref(q, statusFilter, keyLike, page, pageSize));
 }
 
 async function deleteAgent(formData: FormData) {
@@ -153,8 +163,17 @@ async function deleteAgent(formData: FormData) {
   const q = String(formData.get("q") ?? "").trim();
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
 
+  await softDeleteAgentById(id, user.id);
+  revalidatePath("/agents");
+  revalidatePath("/experiments");
+  redirect(buildListHref(q, status, keyLike, page, pageSize));
+}
+
+async function softDeleteAgentById(id: number, userId: string) {
   await dbQuery(
     `UPDATE agents
      SET is_deleted = TRUE,
@@ -164,36 +183,88 @@ async function deleteAgent(formData: FormData) {
          status = 'archived',
          version = CONCAT(version, '__deleted__', id)
      WHERE id = $1 AND deleted_at IS NULL`,
-    [id, user.id]
+    [id, userId]
   );
   await dbQuery(
     `UPDATE experiments
      SET is_deleted = TRUE,
          deleted_at = CURRENT_TIMESTAMP,
          updated_by = $2,
-         updated_at = CURRENT_TIMESTAMP
+     updated_at = CURRENT_TIMESTAMP
      WHERE agent_id = $1 AND deleted_at IS NULL`,
-    [id, user.id]
+    [id, userId]
   );
+}
+
+async function bulkDeleteAgent(formData: FormData) {
+  "use server";
+  const user = await requireUser();
+
+  const ids = parseSelectedIds(formData);
+  const q = String(formData.get("q") ?? "").trim();
+  const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
+  const keyLike = String(formData.get("keyLike") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
+  if (ids.length <= 0) return;
+
+  for (const id of ids) {
+    await softDeleteAgentById(id, user.id);
+  }
   revalidatePath("/agents");
   revalidatePath("/experiments");
-  redirect(buildListHref(q, status, keyLike));
+  redirect(buildListHref(q, status, keyLike, page, pageSize));
 }
 
 export default async function AgentsPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; status?: string; keyLike?: string; panel?: string; id?: string; error?: string }>;
+  searchParams: Promise<{ q?: string; status?: string; keyLike?: string; panel?: string; id?: string; error?: string; page?: string; pageSize?: string }>;
 }) {
   await requireUser();
 
-  const { q = "", status = "all", keyLike = "", panel = "none", id = "", error = "" } = await searchParams;
+  const { q = "", status = "all", keyLike = "", panel = "none", id = "", error = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
   const filters = { q: q.trim(), status: status.trim() || "all", keyLike: keyLike.trim() };
+  const pageSize = parsePageSize(pageSizeRaw);
+  const requestedPage = parsePage(pageRaw);
   const creating = panel === "create";
   const filtering = panel === "filter";
   const parsedId = id.trim() ? Number(id.trim()) : 0;
   const editingId = Number.isInteger(parsedId) && parsedId > 0 ? parsedId : 0;
 
+  const filterParams = [filters.q, filters.q, filters.q, filters.q, filters.keyLike, filters.keyLike, filters.status, filters.status];
+  const [countResult, editing] = await Promise.all([
+    dbQuery<{ total_count: number | string }>(
+      `SELECT COUNT(*) AS total_count
+       FROM agents
+       WHERE ($1 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(version) LIKE CONCAT('%', LOWER($4), '%'))
+         AND deleted_at IS NULL
+         AND ($5 = '' OR LOWER(agent_key) LIKE CONCAT('%', LOWER($6), '%'))
+         AND ($7 = 'all' OR status = $8)`,
+      filterParams
+    ),
+    editingId
+      ? dbQuery<{
+          id: number;
+          agent_key: string;
+          version: string;
+          name: string;
+          description: string;
+          runtime_spec_json: RuntimeSpec | null;
+          status: string;
+          updated_at: string;
+        }>(
+          `SELECT id, agent_key, version, name, description, runtime_spec_json, status, updated_at
+           FROM agents
+           WHERE id = $1 AND deleted_at IS NULL
+           LIMIT 1`,
+          [editingId]
+        )
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; agent_key: string; version: string; name: string; description: string; runtime_spec_json: RuntimeSpec | null; status: string; updated_at: string }>; rowCount: number })
+  ]);
+  const total = Number(countResult.rows[0]?.total_count ?? 0);
+  const page = clampPage(requestedPage, total, pageSize);
+  const offset = getOffset(page, pageSize);
   const rowsResult = await dbQuery<{
     id: number;
     agent_key: string;
@@ -210,18 +281,21 @@ export default async function AgentsPage({
        AND deleted_at IS NULL
        AND ($5 = '' OR LOWER(agent_key) LIKE CONCAT('%', LOWER($6), '%'))
        AND ($7 = 'all' OR status = $8)
-     ORDER BY updated_at DESC`,
-    [filters.q, filters.q, filters.q, filters.q, filters.keyLike, filters.keyLike, filters.status, filters.status]
+     ORDER BY updated_at DESC
+     LIMIT $9 OFFSET $10`,
+    [...filterParams, pageSize, offset]
   );
-
   const rows = rowsResult.rows;
 
-  const listHref = buildListHref(filters.q, filters.status, filters.keyLike);
+  const listHref = buildListHref(filters.q, filters.status, filters.keyLike, page, pageSize);
   const createHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=create`;
   const filterHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=filter`;
   const hasFilter = filters.status !== "all" || !!filters.keyLike;
-  const editing = editingId ? rows.find((row) => row.id === editingId) : undefined;
-  const showDrawer = creating || Boolean(editing);
+  const editingRow = editing.rowCount > 0 ? editing.rows[0] : undefined;
+  const paginationQuery = { q: filters.q, status: filters.status === "all" ? "" : filters.status, keyLike: filters.keyLike };
+  const resetHref = buildListHref(filters.q, "all", "", 1, pageSize);
+  const showDrawer = creating || Boolean(editingRow);
+  const bulkDeleteFormId = "agent-bulk-delete-form";
 
   return (
     <div className="grid">
@@ -235,6 +309,7 @@ export default async function AgentsPage({
         <form action="/agents" className="search-form">
           <input type="hidden" name="status" value={filters.status} />
           <input type="hidden" name="keyLike" value={filters.keyLike} />
+          <input type="hidden" name="pageSize" value={pageSize} />
           <label className="input-icon-wrap">
             <SearchIcon width={16} height={16} />
             <input name="q" defaultValue={filters.q} placeholder="搜索名称 / key / version" />
@@ -248,6 +323,8 @@ export default async function AgentsPage({
           <Link href={filterHref} className="ghost-btn">
             <FilterIcon width={16} height={16} /> 筛选
           </Link>
+          <BulkSelectionControls formId={bulkDeleteFormId} variant="compact" confirmText="确认批量删除已选 {count} 条 Agent 吗？" />
+          <PaginationControls basePath="/agents" query={paginationQuery} total={total} page={page} pageSize={pageSize} position="top" variant="compact" />
         </div>
       </section>
 
@@ -256,7 +333,7 @@ export default async function AgentsPage({
           <span className="muted">当前筛选:</span>
           {filters.status !== "all" ? <span className="filter-pill">{`状态: ${filters.status}`}</span> : null}
           {filters.keyLike ? <span className="filter-pill">{`Agent Key: ${filters.keyLike}`}</span> : null}
-          <Link href={filters.q ? `/agents?q=${encodeURIComponent(filters.q)}` : "/agents"} className="text-btn">
+          <Link href={resetHref} className="text-btn">
             清空筛选
           </Link>
         </section>
@@ -277,9 +354,17 @@ export default async function AgentsPage({
             <PlusIcon width={16} height={16} /> 新建 Agent
           </Link>
         </div>
+        <form id={bulkDeleteFormId} action={bulkDeleteAgent}>
+          <input type="hidden" name="q" value={filters.q} />
+          <input type="hidden" name="statusFilter" value={filters.status} />
+          <input type="hidden" name="keyLike" value={filters.keyLike} />
+          <input type="hidden" name="page" value={page} />
+          <input type="hidden" name="pageSize" value={pageSize} />
+        </form>
         <table>
           <thead>
             <tr>
+              <th className="bulk-select-cell">选</th>
               <th>名称</th>
               <th>Key / Version</th>
               <th>Runtime</th>
@@ -295,6 +380,9 @@ export default async function AgentsPage({
               const scorersCount = Array.isArray(runtime.scorers) ? runtime.scorers.length : 0;
               return (
               <tr key={row.id}>
+                <td className="bulk-select-cell">
+                  <input type="checkbox" name="selectedIds" value={row.id} form={bulkDeleteFormId} aria-label={`选择 Agent ${row.id}`} />
+                </td>
                 <td>{row.name}</td>
                 <td>
                   <div><code>{row.agent_key}</code></div>
@@ -326,6 +414,8 @@ export default async function AgentsPage({
                       <input type="hidden" name="q" value={filters.q} />
                       <input type="hidden" name="statusFilter" value={filters.status} />
                       <input type="hidden" name="keyLike" value={filters.keyLike} />
+                      <input type="hidden" name="page" value={page} />
+                      <input type="hidden" name="pageSize" value={pageSize} />
                       <SubmitButton className="text-btn danger" pendingText="删除中...">
                         删除
                       </SubmitButton>
@@ -337,6 +427,8 @@ export default async function AgentsPage({
             })}
           </tbody>
         </table>
+        <BulkSelectionControls formId={bulkDeleteFormId} variant="full" confirmText="确认批量删除已选 {count} 条 Agent 吗？" />
+        <PaginationControls basePath="/agents" query={paginationQuery} total={total} page={page} pageSize={pageSize} position="bottom" />
       </section>
 
       {filtering ? (
@@ -353,6 +445,7 @@ export default async function AgentsPage({
               <form action="/agents" className="menu-form">
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="panel" value="none" />
+                <input type="hidden" name="pageSize" value={pageSize} />
                 <label className="field-label">状态</label>
                 <div className="chip-row">
                   {[
@@ -369,7 +462,7 @@ export default async function AgentsPage({
                 <label className="field-label">Agent Key 包含</label>
                 <input name="keyLike" placeholder="例如 openclaw" defaultValue={filters.keyLike} />
                 <SubmitButton pendingText="应用中...">应用筛选</SubmitButton>
-                <Link href={filters.q ? `/agents?q=${encodeURIComponent(filters.q)}` : "/agents"} className="ghost-btn">
+                <Link href={resetHref} className="ghost-btn">
                   重置筛选
                 </Link>
               </form>
@@ -383,28 +476,30 @@ export default async function AgentsPage({
           <Link href={listHref} className="action-overlay-dismiss" aria-label="关闭抽屉蒙层" />
           <aside className="action-drawer">
             <div className="action-drawer-header">
-              <h3>{editing ? "Agent 详情" : "新建 Agent"}</h3>
+              <h3>{editingRow ? "Agent 详情" : "新建 Agent"}</h3>
               <Link href={listHref} className="icon-btn" aria-label="关闭">
                 <span style={{ fontSize: 18, lineHeight: 1 }}>×</span>
               </Link>
             </div>
             <div className="action-drawer-body">
               <form
-                id={editing ? `agent-form-${editing.id}` : "agent-form-create"}
-                action={editing ? updateAgent : createAgent}
+                id={editingRow ? `agent-form-${editingRow.id}` : "agent-form-create"}
+                action={editingRow ? updateAgent : createAgent}
                 className="menu-form form-tone-green"
               >
-                {editing ? <input type="hidden" name="id" value={editing.id} /> : null}
+                {editingRow ? <input type="hidden" name="id" value={editingRow.id} /> : null}
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="statusFilter" value={filters.status} />
                 <input type="hidden" name="keyLike" value={filters.keyLike} />
+                <input type="hidden" name="page" value={page} />
+                <input type="hidden" name="pageSize" value={pageSize} />
 
                 <div className="field-group">
                   <label className="field-head">
                     <span className="field-title required">名称</span>
                     <span className="type-pill">String</span>
                   </label>
-                  <input name="name" placeholder="Agent 名称" required defaultValue={editing?.name ?? ""} />
+                  <input name="name" placeholder="Agent 名称" required defaultValue={editingRow?.name ?? ""} />
                 </div>
 
                 <div className="field-group">
@@ -412,7 +507,7 @@ export default async function AgentsPage({
                     <span className="field-title required">Agent Key</span>
                     <span className="type-pill">Unique</span>
                   </label>
-                  <input name="agentKey" placeholder="例如 openclaw" required defaultValue={editing?.agent_key ?? ""} />
+                  <input name="agentKey" placeholder="例如 openclaw" required defaultValue={editingRow?.agent_key ?? ""} />
                 </div>
 
                 <div className="field-group">
@@ -420,7 +515,7 @@ export default async function AgentsPage({
                     <span className="field-title required">Version</span>
                     <span className="type-pill">SemVer</span>
                   </label>
-                  <input name="version" placeholder="例如 v2026.02.26" required defaultValue={editing?.version ?? ""} />
+                  <input name="version" placeholder="例如 v2026.02.26" required defaultValue={editingRow?.version ?? ""} />
                 </div>
 
                 <div className="field-group">
@@ -431,7 +526,7 @@ export default async function AgentsPage({
                   <div className="chip-row">
                     {["active", "archived"].map((item) => (
                       <label key={item} className="chip">
-                        <input type="radio" name="status" value={item} defaultChecked={(editing?.status ?? "active") === item} />
+                        <input type="radio" name="status" value={item} defaultChecked={(editingRow?.status ?? "active") === item} />
                         {item}
                       </label>
                     ))}
@@ -443,7 +538,7 @@ export default async function AgentsPage({
                     <span className="field-title">Description</span>
                     <span className="type-pill">Optional</span>
                   </label>
-                  <TextareaWithFileUpload name="description" placeholder="描述" defaultValue={editing?.description ?? ""} accept=".txt,.md" />
+                  <TextareaWithFileUpload name="description" placeholder="描述" defaultValue={editingRow?.description ?? ""} accept=".txt,.md" />
                 </div>
 
                 <div className="field-group">
@@ -457,8 +552,8 @@ export default async function AgentsPage({
                     accept=".json,.yaml,.yml,.txt"
                     hint="统一运行配置（runtime_type / agent_image / sandbox / services / scorers）"
                     defaultValue={
-                      editing?.runtime_spec_json
-                        ? JSON.stringify(editing.runtime_spec_json, null, 2)
+                      editingRow?.runtime_spec_json
+                        ? JSON.stringify(editingRow.runtime_spec_json, null, 2)
                         : JSON.stringify(defaultRuntimeSpec, null, 2)
                     }
                   />
@@ -467,18 +562,20 @@ export default async function AgentsPage({
               </form>
               <div className="drawer-actions">
                 <SubmitButton
-                  form={editing ? `agent-form-${editing.id}` : "agent-form-create"}
+                  form={editingRow ? `agent-form-${editingRow.id}` : "agent-form-create"}
                   className="primary-btn"
-                  pendingText={editing ? "更新中..." : "创建中..."}
+                  pendingText={editingRow ? "更新中..." : "创建中..."}
                 >
-                  {editing ? "更新" : "创建"}
+                  {editingRow ? "更新" : "创建"}
                 </SubmitButton>
-                {editing ? (
+                {editingRow ? (
                   <form action={deleteAgent} className="drawer-inline-form">
-                    <input type="hidden" name="id" value={editing.id} />
+                    <input type="hidden" name="id" value={editingRow.id} />
                     <input type="hidden" name="q" value={filters.q} />
                     <input type="hidden" name="statusFilter" value={filters.status} />
                     <input type="hidden" name="keyLike" value={filters.keyLike} />
+                    <input type="hidden" name="page" value={page} />
+                    <input type="hidden" name="pageSize" value={pageSize} />
                     <SubmitButton type="submit" className="danger-btn" pendingText="删除中...">
                       删除
                     </SubmitButton>

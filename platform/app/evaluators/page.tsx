@@ -2,17 +2,36 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { PaginationControls } from "@/app/components/pagination-controls";
+import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
+import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
+import { parseSelectedIds } from "@/lib/form-ids";
 import { requireUser } from "@/lib/supabase-auth";
 import { FilterIcon, JudgeIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
 import { TextareaWithFileUpload } from "../components/textarea-with-file-upload";
 
-function buildListHref(q: string, provider: string, model: string) {
+function buildListHref(q: string, provider: string, model: string, page: number, pageSize: number) {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (provider !== "all") params.set("provider", provider);
   if (model) params.set("model", model);
+  if (page > 1) params.set("page", String(page));
+  if (pageSize !== 10) params.set("pageSize", String(pageSize));
   return params.size > 0 ? `/evaluators?${params.toString()}` : "/evaluators";
+}
+
+function normalizeApiStyle(raw: string) {
+  const value = raw.trim().toLowerCase();
+  if (value === "anthropic") return "anthropic";
+  return "openai";
+}
+
+function maskApiKey(value: string) {
+  const v = value.trim();
+  if (!v) return "-";
+  if (v.length <= 8) return "****";
+  return `${v.slice(0, 4)}****${v.slice(-4)}`;
 }
 
 async function createEvaluator(formData: FormData) {
@@ -24,21 +43,25 @@ async function createEvaluator(formData: FormData) {
   const promptTemplate = String(formData.get("promptTemplate") ?? "").trim();
   const baseUrl = String(formData.get("baseUrl") ?? "").trim();
   const modelName = String(formData.get("modelName") ?? "").trim();
+  const apiStyle = normalizeApiStyle(String(formData.get("apiStyle") ?? "openai"));
+  const apiKey = String(formData.get("apiKey") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
   const provider = String(formData.get("provider") ?? "all").trim() || "all";
   const model = String(formData.get("model") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   if (!evaluatorKey || !name || !promptTemplate || !baseUrl || !modelName) return;
 
   await dbQuery(
-    `INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by, updated_at)
-     SELECT $1, $2, $3, $4, $5, $6, $6, CURRENT_TIMESTAMP
-     WHERE NOT EXISTS (SELECT 1 FROM evaluators WHERE evaluator_key = $7 AND deleted_at IS NULL)`,
-    [evaluatorKey, name, promptTemplate, baseUrl, modelName, user.id, evaluatorKey]
+    `INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by, updated_at)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $8, CURRENT_TIMESTAMP
+     WHERE NOT EXISTS (SELECT 1 FROM evaluators WHERE evaluator_key = $9 AND deleted_at IS NULL)`,
+    [evaluatorKey, name, promptTemplate, baseUrl, modelName, apiStyle, apiKey, user.id, evaluatorKey]
   );
 
   revalidatePath("/evaluators");
-  redirect(buildListHref(q, provider, model));
+  redirect(buildListHref(q, provider, model, page, pageSize));
 }
 
 async function updateEvaluator(formData: FormData) {
@@ -52,21 +75,25 @@ async function updateEvaluator(formData: FormData) {
   const promptTemplate = String(formData.get("promptTemplate") ?? "").trim();
   const baseUrl = String(formData.get("baseUrl") ?? "").trim();
   const modelName = String(formData.get("modelName") ?? "").trim();
+  const apiStyle = normalizeApiStyle(String(formData.get("apiStyle") ?? "openai"));
+  const apiKey = String(formData.get("apiKey") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
   const provider = String(formData.get("provider") ?? "all").trim() || "all";
   const model = String(formData.get("model") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   if (!idRaw || !Number.isInteger(id) || id <= 0 || !evaluatorKey || !name || !promptTemplate || !baseUrl || !modelName) return;
 
   await dbQuery(
     `UPDATE evaluators
-     SET evaluator_key = $2, name = $3, prompt_template = $4, base_url = $5, model_name = $6, updated_by = $7, updated_at = CURRENT_TIMESTAMP
+     SET evaluator_key = $2, name = $3, prompt_template = $4, base_url = $5, model_name = $6, api_style = $7, api_key = $8, updated_by = $9, updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND deleted_at IS NULL`,
-    [id, evaluatorKey, name, promptTemplate, baseUrl, modelName, user.id]
+    [id, evaluatorKey, name, promptTemplate, baseUrl, modelName, apiStyle, apiKey, user.id]
   );
 
   revalidatePath("/evaluators");
-  redirect(buildListHref(q, provider, model));
+  redirect(buildListHref(q, provider, model, page, pageSize));
 }
 
 async function deleteEvaluator(formData: FormData) {
@@ -78,7 +105,15 @@ async function deleteEvaluator(formData: FormData) {
   const q = String(formData.get("q") ?? "").trim();
   const provider = String(formData.get("provider") ?? "all").trim() || "all";
   const model = String(formData.get("model") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
+  await softDeleteEvaluatorById(id, user.id);
+  revalidatePath("/evaluators");
+  redirect(buildListHref(q, provider, model, page, pageSize));
+}
+
+async function softDeleteEvaluatorById(id: number, userId: string) {
   await dbQuery(
     `UPDATE evaluators
      SET is_deleted = TRUE,
@@ -87,26 +122,82 @@ async function deleteEvaluator(formData: FormData) {
          updated_at = CURRENT_TIMESTAMP,
          evaluator_key = CONCAT(evaluator_key, '__deleted__', id)
      WHERE id = $1 AND deleted_at IS NULL`,
-    [id, user.id]
+    [id, userId]
   );
+}
+
+async function bulkDeleteEvaluator(formData: FormData) {
+  "use server";
+  const user = await requireUser();
+
+  const ids = parseSelectedIds(formData);
+  const q = String(formData.get("q") ?? "").trim();
+  const provider = String(formData.get("provider") ?? "all").trim() || "all";
+  const model = String(formData.get("model") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
+  if (ids.length <= 0) return;
+
+  for (const id of ids) {
+    await softDeleteEvaluatorById(id, user.id);
+  }
   revalidatePath("/evaluators");
-  redirect(buildListHref(q, provider, model));
+  redirect(buildListHref(q, provider, model, page, pageSize));
 }
 
 export default async function EvaluatorsPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; panel?: string; id?: string; provider?: string; model?: string }>;
+  searchParams: Promise<{ q?: string; panel?: string; id?: string; provider?: string; model?: string; page?: string; pageSize?: string }>;
 }) {
   await requireUser();
 
-  const { q = "", panel = "none", id = "", provider = "all", model = "" } = await searchParams;
+  const { q = "", panel = "none", id = "", provider = "all", model = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
   const filters = { q: q.trim(), provider: provider.trim() || "all", model: model.trim() };
+  const pageSize = parsePageSize(pageSizeRaw);
+  const requestedPage = parsePage(pageRaw);
   const creating = panel === "create";
   const filtering = panel === "filter";
   const parsedId = id.trim() ? Number(id.trim()) : 0;
   const editingId = Number.isInteger(parsedId) && parsedId > 0 ? parsedId : 0;
 
+  const filterParams = [filters.q, filters.q, filters.q, filters.model, filters.model, filters.provider];
+  const [countResult, editing] = await Promise.all([
+    dbQuery<{ total_count: number | string }>(
+      `SELECT COUNT(*) AS total_count
+       FROM evaluators
+       WHERE ($1 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(evaluator_key) LIKE CONCAT('%', LOWER($3), '%'))
+         AND deleted_at IS NULL
+         AND ($4 = '' OR LOWER(model_name) LIKE CONCAT('%', LOWER($5), '%'))
+         AND (
+           $6 = 'all'
+           OR ($6 = 'openai' AND api_style = 'openai')
+           OR ($6 = 'custom' AND api_style <> 'openai')
+         )`,
+      filterParams
+    ),
+    editingId
+      ? dbQuery<{
+          id: number;
+          evaluator_key: string;
+          name: string;
+          prompt_template: string;
+          base_url: string;
+          model_name: string;
+          api_style: string;
+          api_key: string;
+        }>(
+          `SELECT id, evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key
+           FROM evaluators
+           WHERE id = $1 AND deleted_at IS NULL
+           LIMIT 1`,
+          [editingId]
+        )
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; evaluator_key: string; name: string; prompt_template: string; base_url: string; model_name: string; api_style: string; api_key: string }>; rowCount: number })
+  ]);
+  const total = Number(countResult.rows[0]?.total_count ?? 0);
+  const page = clampPage(requestedPage, total, pageSize);
+  const offset = getOffset(page, pageSize);
   const { rows } = await dbQuery<{
     id: number;
     evaluator_key: string;
@@ -114,27 +205,37 @@ export default async function EvaluatorsPage({
     prompt_template: string;
     base_url: string;
     model_name: string;
+    api_style: string;
+    api_key: string;
   }>(
-    `SELECT id, evaluator_key, name, prompt_template, base_url, model_name
+    `SELECT id, evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key
      FROM evaluators
      WHERE ($1 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(evaluator_key) LIKE CONCAT('%', LOWER($3), '%'))
        AND deleted_at IS NULL
        AND ($4 = '' OR LOWER(model_name) LIKE CONCAT('%', LOWER($5), '%'))
        AND (
          $6 = 'all'
-         OR ($6 = 'openai' AND LOWER(base_url) LIKE '%openai%')
-         OR ($6 = 'custom' AND LOWER(base_url) NOT LIKE '%openai%')
+         OR ($6 = 'openai' AND api_style = 'openai')
+         OR ($6 = 'custom' AND api_style <> 'openai')
        )
-     ORDER BY created_at ASC`,
-    [filters.q, filters.q, filters.q, filters.model, filters.model, filters.provider]
+     ORDER BY created_at ASC
+     LIMIT $7 OFFSET $8`,
+    [...filterParams, pageSize, offset]
   );
 
-  const listHref = buildListHref(filters.q, filters.provider, filters.model);
+  const listHref = buildListHref(filters.q, filters.provider, filters.model, page, pageSize);
   const createHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=create`;
   const filterHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=filter`;
   const hasFilter = filters.provider !== "all" || !!filters.model;
-  const editing = editingId ? rows.find((row) => row.id === editingId) : undefined;
-  const showDrawer = creating || Boolean(editing);
+  const editingRow = editing.rowCount > 0 ? editing.rows[0] : undefined;
+  const paginationQuery = {
+    q: filters.q,
+    provider: filters.provider === "all" ? "" : filters.provider,
+    model: filters.model
+  };
+  const resetHref = buildListHref(filters.q, "all", "", 1, pageSize);
+  const showDrawer = creating || Boolean(editingRow);
+  const bulkDeleteFormId = "evaluator-bulk-delete-form";
 
   return (
     <div className="grid">
@@ -148,6 +249,7 @@ export default async function EvaluatorsPage({
         <form action="/evaluators" className="search-form">
           <input type="hidden" name="provider" value={filters.provider} />
           <input type="hidden" name="model" value={filters.model} />
+          <input type="hidden" name="pageSize" value={pageSize} />
           <label className="input-icon-wrap">
             <SearchIcon width={16} height={16} />
             <input name="q" defaultValue={filters.q} placeholder="搜索评估器名称或 key" />
@@ -161,6 +263,8 @@ export default async function EvaluatorsPage({
           <Link href={filterHref} className="ghost-btn">
             <FilterIcon width={16} height={16} /> 筛选
           </Link>
+          <BulkSelectionControls formId={bulkDeleteFormId} variant="compact" confirmText="确认批量删除已选 {count} 条 Evaluator 吗？" />
+          <PaginationControls basePath="/evaluators" query={paginationQuery} total={total} page={page} pageSize={pageSize} position="top" variant="compact" />
         </div>
       </section>
 
@@ -169,7 +273,7 @@ export default async function EvaluatorsPage({
           <span className="muted">当前筛选:</span>
           {filters.provider !== "all" ? <span className="filter-pill">{`Provider: ${filters.provider}`}</span> : null}
           {filters.model ? <span className="filter-pill">{`Model: ${filters.model}`}</span> : null}
-          <Link href={filters.q ? `/evaluators?q=${encodeURIComponent(filters.q)}` : "/evaluators"} className="text-btn">
+          <Link href={resetHref} className="text-btn">
             清空筛选
           </Link>
         </section>
@@ -185,12 +289,21 @@ export default async function EvaluatorsPage({
             <PlusIcon width={16} height={16} /> 新建 Evaluator
           </Link>
         </div>
+        <form id={bulkDeleteFormId} action={bulkDeleteEvaluator}>
+          <input type="hidden" name="q" value={filters.q} />
+          <input type="hidden" name="provider" value={filters.provider} />
+          <input type="hidden" name="model" value={filters.model} />
+          <input type="hidden" name="page" value={page} />
+          <input type="hidden" name="pageSize" value={pageSize} />
+        </form>
         <table>
           <thead>
             <tr>
+              <th className="bulk-select-cell">选</th>
               <th>名称</th>
               <th>Key</th>
               <th>Base URL / Model</th>
+              <th>API</th>
               <th>Prompt 预览</th>
               <th>操作</th>
             </tr>
@@ -198,6 +311,9 @@ export default async function EvaluatorsPage({
           <tbody>
             {rows.map((row) => (
               <tr key={row.id}>
+                <td className="bulk-select-cell">
+                  <input type="checkbox" name="selectedIds" value={row.id} form={bulkDeleteFormId} aria-label={`选择 Evaluator ${row.id}`} />
+                </td>
                 <td>{row.name}</td>
                 <td>
                   <code>{row.evaluator_key}</code>
@@ -208,6 +324,14 @@ export default async function EvaluatorsPage({
                   </div>
                   <div className="muted">
                     <code>{row.model_name}</code>
+                  </div>
+                </td>
+                <td>
+                  <div>
+                    <code>{row.api_style}</code>
+                  </div>
+                  <div className="muted">
+                    <code>{maskApiKey(row.api_key)}</code>
                   </div>
                 </td>
                 <td>
@@ -230,6 +354,8 @@ export default async function EvaluatorsPage({
                       <input type="hidden" name="q" value={filters.q} />
                       <input type="hidden" name="provider" value={filters.provider} />
                       <input type="hidden" name="model" value={filters.model} />
+                      <input type="hidden" name="page" value={page} />
+                      <input type="hidden" name="pageSize" value={pageSize} />
                       <SubmitButton className="text-btn danger" pendingText="删除中...">
                         删除
                       </SubmitButton>
@@ -240,6 +366,8 @@ export default async function EvaluatorsPage({
             ))}
           </tbody>
         </table>
+        <BulkSelectionControls formId={bulkDeleteFormId} variant="full" confirmText="确认批量删除已选 {count} 条 Evaluator 吗？" />
+        <PaginationControls basePath="/evaluators" query={paginationQuery} total={total} page={page} pageSize={pageSize} position="bottom" />
       </section>
 
       {filtering ? (
@@ -256,6 +384,7 @@ export default async function EvaluatorsPage({
               <form action="/evaluators" className="menu-form">
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="panel" value="none" />
+                <input type="hidden" name="pageSize" value={pageSize} />
                 <label className="field-label">Provider 类型</label>
                 <div className="chip-row">
                   {[
@@ -272,7 +401,7 @@ export default async function EvaluatorsPage({
                 <label className="field-label">Model 包含</label>
                 <input name="model" placeholder="如 gpt-4.1" defaultValue={filters.model} />
                 <SubmitButton pendingText="应用中...">应用筛选</SubmitButton>
-                <Link href={filters.q ? `/evaluators?q=${encodeURIComponent(filters.q)}` : "/evaluators"} className="ghost-btn">
+                <Link href={resetHref} className="ghost-btn">
                   重置筛选
                 </Link>
               </form>
@@ -286,27 +415,29 @@ export default async function EvaluatorsPage({
           <Link href={listHref} className="action-overlay-dismiss" aria-label="关闭抽屉蒙层" />
           <aside className="action-drawer">
             <div className="action-drawer-header">
-              <h3>{editing ? "Evaluator 详情" : "新建 Evaluator"}</h3>
+              <h3>{editingRow ? "Evaluator 详情" : "新建 Evaluator"}</h3>
               <Link href={listHref} className="icon-btn" aria-label="关闭">
                 <span style={{ fontSize: 18, lineHeight: 1 }}>×</span>
               </Link>
             </div>
             <div className="action-drawer-body">
               <form
-                id={editing ? `evaluator-form-${editing.id}` : "evaluator-form-create"}
-                action={editing ? updateEvaluator : createEvaluator}
+                id={editingRow ? `evaluator-form-${editingRow.id}` : "evaluator-form-create"}
+                action={editingRow ? updateEvaluator : createEvaluator}
                 className="menu-form form-tone-green"
               >
-                {editing ? <input type="hidden" name="id" value={editing.id} /> : null}
+                {editingRow ? <input type="hidden" name="id" value={editingRow.id} /> : null}
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="provider" value={filters.provider} />
                 <input type="hidden" name="model" value={filters.model} />
+                <input type="hidden" name="page" value={page} />
+                <input type="hidden" name="pageSize" value={pageSize} />
                 <div className="field-group">
                   <label className="field-head">
                     <span className="field-title required">Evaluator 名称</span>
                     <span className="type-pill">String</span>
                   </label>
-                  <input name="name" placeholder="Evaluator 名称" required defaultValue={editing?.name ?? ""} />
+                  <input name="name" placeholder="Evaluator 名称" required defaultValue={editingRow?.name ?? ""} />
                 </div>
                 <div className="field-group">
                   <label className="field-head">
@@ -317,7 +448,7 @@ export default async function EvaluatorsPage({
                     name="evaluatorKey"
                     placeholder="evaluator key（唯一）"
                     required
-                    defaultValue={editing?.evaluator_key ?? ""}
+                    defaultValue={editingRow?.evaluator_key ?? ""}
                   />
                 </div>
                 <div className="field-group">
@@ -327,9 +458,9 @@ export default async function EvaluatorsPage({
                   </label>
                   <input
                     name="baseUrl"
-                    placeholder="Base URL（如 https://api.openai.com/v1）"
+                    placeholder="Base URL（如 https://ark.cn-beijing.volces.com/api/coding/v3）"
                     required
-                    defaultValue={editing?.base_url ?? "https://api.openai.com/v1"}
+                    defaultValue={editingRow?.base_url ?? "https://ark.cn-beijing.volces.com/api/coding/v3"}
                   />
                 </div>
                 <div className="field-group">
@@ -339,9 +470,31 @@ export default async function EvaluatorsPage({
                   </label>
                   <input
                     name="modelName"
-                    placeholder="Model Name（如 gpt-4.1-mini）"
+                    placeholder="Model Name（如 kimi-k2.5）"
                     required
-                    defaultValue={editing?.model_name ?? "gpt-4.1-mini"}
+                    defaultValue={editingRow?.model_name ?? "kimi-k2.5"}
+                  />
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">API Style</span>
+                    <span className="type-pill">Enum</span>
+                  </label>
+                  <select name="apiStyle" defaultValue={editingRow?.api_style ?? "anthropic"} required>
+                    <option value="openai">openai</option>
+                    <option value="anthropic">anthropic</option>
+                  </select>
+                </div>
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required">API Key</span>
+                    <span className="type-pill">Secret</span>
+                  </label>
+                  <input
+                    name="apiKey"
+                    placeholder="API Key"
+                    required
+                    defaultValue={editingRow?.api_key ?? ""}
                   />
                 </div>
                 <div className="field-group">
@@ -354,24 +507,26 @@ export default async function EvaluatorsPage({
                     placeholder="评估 Prompt 模板"
                     required
                     accept=".txt,.md,.json"
-                    defaultValue={editing?.prompt_template ?? ""}
+                    defaultValue={editingRow?.prompt_template ?? ""}
                   />
                 </div>
               </form>
               <div className="drawer-actions">
                 <SubmitButton
-                  form={editing ? `evaluator-form-${editing.id}` : "evaluator-form-create"}
+                  form={editingRow ? `evaluator-form-${editingRow.id}` : "evaluator-form-create"}
                   className="primary-btn"
-                  pendingText={editing ? "更新中..." : "创建中..."}
+                  pendingText={editingRow ? "更新中..." : "创建中..."}
                 >
-                  {editing ? "更新" : "创建"}
+                  {editingRow ? "更新" : "创建"}
                 </SubmitButton>
-                {editing ? (
+                {editingRow ? (
                   <form action={deleteEvaluator} className="drawer-inline-form">
-                    <input type="hidden" name="id" value={editing.id} />
+                    <input type="hidden" name="id" value={editingRow.id} />
                     <input type="hidden" name="q" value={filters.q} />
                     <input type="hidden" name="provider" value={filters.provider} />
                     <input type="hidden" name="model" value={filters.model} />
+                    <input type="hidden" name="page" value={page} />
+                    <input type="hidden" name="pageSize" value={pageSize} />
                     <SubmitButton type="submit" className="danger-btn" pendingText="删除中...">
                       删除
                     </SubmitButton>

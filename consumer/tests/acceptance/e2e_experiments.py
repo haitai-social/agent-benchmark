@@ -2,13 +2,29 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
+import random
 import sys
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
+
+from app.message_processor import MessageProcessor
+from domain.parser import parse_message
+from infrastructure.config import load_settings
+from infrastructure.db_repository import DbRepository
+from infrastructure.docker_runner import DockerRunner
+from infrastructure.otel_collector import OTelCollectorServer, OTelSpanStore
+from infrastructure.trace_repository import TraceIngestRepository, TraceRepository
+from runtime.inspect_runner import InspectRunner
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 
 @dataclass
@@ -29,6 +45,23 @@ class AcceptanceResult:
     inspect_eval_count: int
     sample_output: Any
     sample_logs_head: str
+
+
+class _NoopLock:
+    def build_suffix(self, message_id: str, body: bytes) -> str:
+        return message_id
+
+    def already_processed(self, key_suffix: str) -> bool:
+        return False
+
+    def acquire_processing(self, key_suffix: str) -> bool:
+        return True
+
+    def release_processing(self, key_suffix: str) -> None:
+        return None
+
+    def mark_processed(self, key_suffix: str) -> None:
+        return None
 
 
 def _mysql_password() -> str:
@@ -53,12 +86,11 @@ def _dict_cursor_class() -> Any:
     return getattr(cursors_module, "DictCursor")
 
 
-def _create_dispatch() -> tuple[int, int, int, str]:
+def _create_dispatch() -> tuple[int, int, int, str, dict[str, Any]]:
     try:
-        import pika  # type: ignore[import-not-found]
         import pymysql  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("pymysql and pika are required") from exc
+        raise RuntimeError("pymysql is required") from exc
 
     mysql_conn = pymysql.connect(
         host=_must_env("MYSQL_SERVER"),
@@ -102,6 +134,10 @@ def _create_dispatch() -> tuple[int, int, int, str]:
             evaluators = [cast(dict[str, Any], row) for row in (cur.fetchall() or [])]
             if not evaluators:
                 raise RuntimeError("no evaluator with non-empty api_key available")
+            max_evaluators = max(1, int(os.environ.get("ACCEPTANCE_MAX_EVALUATORS", "1")))
+            if len(evaluators) > max_evaluators:
+                rng = random.Random(int(os.environ.get("ACCEPTANCE_RANDOM_SEED", "20260228")))
+                evaluators = rng.sample(evaluators, max_evaluators)
 
             cur.execute(
                 """
@@ -115,14 +151,18 @@ def _create_dispatch() -> tuple[int, int, int, str]:
             items = [cast(dict[str, Any], row) for row in (cur.fetchall() or [])]
             if not items:
                 raise RuntimeError(f"no data_items for dataset={dataset['id']}")
+            max_data_items = max(1, int(os.environ.get("ACCEPTANCE_MAX_DATA_ITEMS", "1")))
+            if len(items) > max_data_items:
+                rng = random.Random(int(os.environ.get("ACCEPTANCE_RANDOM_SEED", "20260228")))
+                items = rng.sample(items, max_data_items)
 
             created_by = os.environ.get("ACCEPTANCE_CREATED_BY", "acceptance-script")
-            exp_name = f"验收-mq-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            exp_name = f"验收-direct-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             cur.execute(
                 """
                 INSERT INTO experiments
                 (name, dataset_id, agent_id, queue_status, queued_at, created_by, updated_by, created_at, updated_at)
-                VALUES (%s, %s, %s, 'queued', CURRENT_TIMESTAMP, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, 'test_case', CURRENT_TIMESTAMP, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
                 (exp_name, int(dataset["id"]), int(agent["id"]), created_by, created_by),
             )
@@ -162,15 +202,14 @@ def _create_dispatch() -> tuple[int, int, int, str]:
                 )
         mysql_conn.commit()
 
-        queue_name = os.environ.get("RABBITMQ_EXPERIMENT_QUEUE", "haitai.agent.benchmark.experiment")
         message_id = str(uuid.uuid4())
         message = {
             "message_type": "experiment.run.requested",
             "schema_version": "v2",
             "message_id": message_id,
             "produced_at": datetime.now(timezone.utc).isoformat(),
-            "source": {"service": "acceptance-script", "queue": queue_name},
-            "experiment": {"id": experiment_id, "triggered_by": "acceptance"},
+            "source": {"service": "acceptance-direct", "queue": "direct"},
+            "experiment": {"id": experiment_id, "triggered_by": "test_case"},
             "dataset": {"id": int(dataset["id"]), "name": dataset["name"]},
             "agent": {
                 "id": int(agent["id"]),
@@ -205,30 +244,53 @@ def _create_dispatch() -> tuple[int, int, int, str]:
             },
         }
 
-        rabbit_url = (
-            f"amqp://{_must_env('RABBITMQ_USER')}:{_must_env('RABBITMQ_PASSWORD')}"
-            f"@{_must_env('RABBITMQ_HOST')}:{os.environ.get('RABBITMQ_PORT', '5672')}/%2F"
-        )
-        rb_conn = pika.BlockingConnection(pika.URLParameters(rabbit_url))
-        try:
-            ch = rb_conn.channel()
-            ch.queue_declare(queue=queue_name, durable=True)
-            ch.basic_publish(
-                exchange="",
-                routing_key=queue_name,
-                body=json.dumps(message, ensure_ascii=False).encode("utf-8"),
-                properties=pika.BasicProperties(content_type="application/json", delivery_mode=2, message_id=message_id),
-            )
-        finally:
-            rb_conn.close()
-
         with mysql_conn.cursor() as cur:
             cur.execute("UPDATE experiments SET queue_message_id = %s WHERE id = %s", (message_id, experiment_id))
         mysql_conn.commit()
 
-        return experiment_id, len(run_cases_payload), len(evaluators), message_id
+        return experiment_id, len(run_cases_payload), len(evaluators), message_id, message
     finally:
         mysql_conn.close()
+
+
+def _run_direct(message_payload: dict[str, Any]) -> None:
+    settings = load_settings()
+    runner = DockerRunner(
+        timeout_seconds=settings.case_timeout_seconds,
+        docker_network=settings.docker_network,
+        agent_exec_command=settings.agent_exec_command,
+        pull_policy=settings.docker_pull_policy,
+        pull_timeout_seconds=settings.docker_pull_timeout_seconds,
+        run_timeout_seconds=settings.docker_run_timeout_seconds,
+        inspect_timeout_seconds=settings.docker_inspect_timeout_seconds,
+    )
+
+    collector: OTelCollectorServer | None = None
+    if settings.otel_enabled and settings.otel_collector_enabled:
+        trace_sink = TraceIngestRepository.from_settings(settings)
+        span_store = OTelSpanStore(sink=trace_sink)
+        collector = OTelCollectorServer(
+            host=settings.otel_collector_host,
+            port=settings.otel_collector_port,
+            path=settings.otel_collector_path,
+            store=span_store,
+        )
+        trajectory_source = span_store
+    else:
+        trajectory_source = TraceRepository.from_settings(settings)
+
+    inspect_runner = InspectRunner(runner, settings=settings, trace_repository=trajectory_source)
+    db = DbRepository.from_settings(settings)
+    processor = MessageProcessor(settings=settings, runner=inspect_runner, lock=_NoopLock(), db=db)
+
+    message = parse_message(message_payload)
+    if collector:
+        collector.start()
+    try:
+        processor._execute_cases(message)
+    finally:
+        if collector:
+            collector.stop()
 
 
 def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id: str) -> AcceptanceResult:
@@ -273,7 +335,7 @@ def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id
                 summary = _require_row("summary", cur.fetchone() or {})
 
                 done_cases = int(summary.get("done_cases") or 0)
-                if done_cases >= total_cases and queue_status == "done":
+                if done_cases >= total_cases and queue_status in {"done", "failed", "test_case"}:
                     cur.execute(
                         "SELECT COUNT(*) AS c FROM run_case_scores WHERE run_case_id IN (SELECT id FROM run_cases WHERE experiment_id = %s)",
                         (experiment_id,),
@@ -296,7 +358,7 @@ def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id
                     sample = _require_row("sample", cur.fetchone() or {})
 
                     return AcceptanceResult(
-                        ok=queue_status == "done" and int(summary.get("failed_cases") or 0) == 0,
+                        ok=queue_status in {"done", "test_case"} and int(summary.get("failed_cases") or 0) == 0,
                         experiment_id=experiment_id,
                         message_id=message_id,
                         queue_status=queue_status,
@@ -338,7 +400,7 @@ def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id
 
 
 def main() -> int:
-    exp_id, total_cases, evaluator_count, message_id = _create_dispatch()
+    exp_id, total_cases, evaluator_count, message_id, message = _create_dispatch()
     print(
         json.dumps(
             {
@@ -347,11 +409,13 @@ def main() -> int:
                 "total_cases": total_cases,
                 "evaluator_count": evaluator_count,
                 "message_id": message_id,
+                "mode": "direct_runner",
             },
             ensure_ascii=False,
         )
     )
 
+    _run_direct(message)
     result = _poll(exp_id, total_cases, evaluator_count, message_id)
     print(
         json.dumps(

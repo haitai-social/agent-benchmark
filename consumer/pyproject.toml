@@ -9,3 +9,6 @@ requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+  "e2e: end-to-end tests that require DB and Docker",
+]

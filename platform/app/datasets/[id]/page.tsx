@@ -2,6 +2,10 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { PaginationControls } from "@/app/components/pagination-controls";
+import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
+import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
+import { parseSelectedIds } from "@/lib/form-ids";
 import { parseJsonOrWrap } from "@/lib/safe-json";
 import { requireUser } from "@/lib/supabase-auth";
 import {
@@ -17,6 +21,18 @@ import { ReferenceTrajectorySourceField } from "@/app/components/reference-traje
 import { EntityDrawer } from "@/app/components/entity-drawer";
 import { FormField } from "@/app/components/form-field";
 import { TextareaWithFileUpload } from "@/app/components/textarea-with-file-upload";
+
+function buildDetailHref(id: number, q: string, page: number, pageSize: number, extras?: Record<string, string>) {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (page > 1) params.set("page", String(page));
+  if (pageSize !== 10) params.set("pageSize", String(pageSize));
+  for (const [key, value] of Object.entries(extras ?? {})) {
+    if (value) params.set(key, value);
+  }
+  const qs = params.toString();
+  return qs ? `/datasets/${id}?${qs}` : `/datasets/${id}`;
+}
 
 async function resolveTrajectory(
   trajectorySource: string,
@@ -55,6 +71,8 @@ async function createItem(formData: FormData) {
   const manualReferenceTrajectoryRaw = String(formData.get("manualReferenceTrajectory") ?? "");
   const referenceOutputRaw = String(formData.get("referenceOutput") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   if (!datasetIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !userInput) return;
 
@@ -84,7 +102,7 @@ async function createItem(formData: FormData) {
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
 
-  redirect(q ? `/datasets/${datasetId}?q=${encodeURIComponent(q)}` : `/datasets/${datasetId}`);
+  redirect(buildDetailHref(datasetId, q, page, pageSize));
 }
 
 async function deleteItem(formData: FormData) {
@@ -95,7 +113,17 @@ async function deleteItem(formData: FormData) {
   const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
   const id = Number(idRaw);
   const datasetId = Number(datasetIdRaw);
+  const q = String(formData.get("q") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
   if (!idRaw || !datasetIdRaw || !Number.isInteger(id) || id <= 0 || !Number.isInteger(datasetId) || datasetId <= 0) return;
+  await softDeleteDataItemById(id, datasetId, user.id);
+  revalidatePath(`/datasets/${datasetId}`);
+  revalidatePath("/datasets");
+  redirect(buildDetailHref(datasetId, q, page, pageSize));
+}
+
+async function softDeleteDataItemById(id: number, datasetId: number, userId: string) {
   await dbQuery(
     `UPDATE data_items
      SET is_deleted = TRUE,
@@ -103,11 +131,29 @@ async function deleteItem(formData: FormData) {
          updated_by = $2,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND deleted_at IS NULL`,
-    [id, user.id]
+    [id, userId]
   );
-  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1 AND deleted_at IS NULL`, [datasetId, user.id]);
+  await dbQuery(`UPDATE datasets SET updated_at = CURRENT_TIMESTAMP, updated_by = $2 WHERE id = $1 AND deleted_at IS NULL`, [datasetId, userId]);
+}
+
+async function bulkDeleteItem(formData: FormData) {
+  "use server";
+  const user = await requireUser();
+
+  const datasetIdRaw = String(formData.get("datasetId") ?? "").trim();
+  const datasetId = Number(datasetIdRaw);
+  const ids = parseSelectedIds(formData);
+  const q = String(formData.get("q") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
+  if (!datasetIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || ids.length <= 0) return;
+
+  for (const id of ids) {
+    await softDeleteDataItemById(id, datasetId, user.id);
+  }
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
+  redirect(buildDetailHref(datasetId, q, page, pageSize));
 }
 
 async function updateItem(formData: FormData) {
@@ -124,6 +170,8 @@ async function updateItem(formData: FormData) {
   const manualReferenceTrajectoryRaw = String(formData.get("manualReferenceTrajectory") ?? "");
   const referenceOutputRaw = String(formData.get("referenceOutput") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   if (!datasetIdRaw || !itemIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(itemId) || itemId <= 0 || !userInput) return;
 
@@ -157,7 +205,7 @@ async function updateItem(formData: FormData) {
   revalidatePath(`/datasets/${datasetId}`);
   revalidatePath("/datasets");
 
-  redirect(q ? `/datasets/${datasetId}?q=${encodeURIComponent(q)}` : `/datasets/${datasetId}`);
+  redirect(buildDetailHref(datasetId, q, page, pageSize));
 }
 
 export default async function DatasetDetailPage({
@@ -165,14 +213,16 @@ export default async function DatasetDetailPage({
   searchParams
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ q?: string; add?: string; edit?: string }>;
+  searchParams: Promise<{ q?: string; add?: string; edit?: string; page?: string; pageSize?: string }>;
 }) {
   await requireUser();
 
   const { id: idParam } = await params;
   const id = Number(idParam.trim());
-  const { q = "", add = "0", edit = "" } = await searchParams;
+  const { q = "", add = "0", edit = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
   const qv = q.trim();
+  const pageSize = parsePageSize(pageSizeRaw);
+  const requestedPage = parsePage(pageRaw);
   const adding = add === "1";
   const editId = edit.trim() ? Number(edit.trim()) : 0;
 
@@ -196,8 +246,46 @@ export default async function DatasetDetailPage({
     return <section className="card">评测集不存在</section>;
   }
 
-  const [items, traceIds] = await Promise.all([
+  const [countResult, traceIds, editingItemResult] = await Promise.all([
+    dbQuery<{ total_count: number | string }>(
+      `SELECT COUNT(*) AS total_count
+       FROM data_items
+       WHERE dataset_id = $1
+         AND deleted_at IS NULL
+         AND ($2 = '' OR LOWER(user_input) LIKE CONCAT('%', LOWER($3), '%'))`,
+      [id, qv, qv]
+    ),
     dbQuery<{
+      trace_id: string;
+    }>(
+      `SELECT trace_id FROM traces
+       WHERE deleted_at IS NULL AND trace_id IS NOT NULL AND trace_id <> ''
+       GROUP BY trace_id ORDER BY MAX(id) DESC LIMIT 200`
+    ),
+    Number.isInteger(editId) && editId > 0
+      ? dbQuery<{
+          id: number;
+          session_jsonl: string;
+          user_input: string;
+          trace_id: string | null;
+          reference_output: unknown;
+          reference_trajectory: unknown;
+          updated_at: string;
+          created_at: string;
+        }>(
+          `SELECT id, session_jsonl, user_input, trace_id, reference_output, reference_trajectory, updated_at, created_at
+           FROM data_items
+           WHERE id = $1 AND dataset_id = $2 AND deleted_at IS NULL
+           LIMIT 1`,
+          [editId, id]
+        )
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; session_jsonl: string; user_input: string; trace_id: string | null; reference_output: unknown; reference_trajectory: unknown; updated_at: string; created_at: string }>; rowCount: number })
+  ]);
+
+  const total = Number(countResult.rows[0]?.total_count ?? 0);
+  const page = clampPage(requestedPage, total, pageSize);
+  const offset = getOffset(page, pageSize);
+  const items = await dbQuery<{
       id: number;
       session_jsonl: string;
       user_input: string;
@@ -212,21 +300,18 @@ export default async function DatasetDetailPage({
        WHERE dataset_id = $1
          AND deleted_at IS NULL
          AND ($2 = '' OR LOWER(user_input) LIKE CONCAT('%', LOWER($3), '%'))
-       ORDER BY updated_at DESC`,
-      [id, qv, qv]
-    ),
-    dbQuery<{ trace_id: string }>(
-      `SELECT trace_id FROM traces
-       WHERE deleted_at IS NULL AND trace_id IS NOT NULL AND trace_id <> ''
-       GROUP BY trace_id ORDER BY MAX(id) DESC LIMIT 200`
-    )
-  ]);
+       ORDER BY updated_at DESC
+       LIMIT $4 OFFSET $5`,
+    [id, qv, qv, pageSize, offset]
+  );
 
   const dataset = ds.rows[0];
-  const baseHref = qv ? `/datasets/${id}?q=${encodeURIComponent(qv)}` : `/datasets/${id}`;
-  const editingItem = editId ? items.rows.find((item) => item.id === editId) : undefined;
+  const baseHref = buildDetailHref(id, qv, page, pageSize);
+  const editingItem = editingItemResult.rowCount > 0 ? editingItemResult.rows[0] : undefined;
   const showingEditor = adding || Boolean(editingItem);
   const itemEditorFormId = editingItem ? `item-editor-${editingItem.id}` : "item-editor-create";
+  const paginationQuery = { q: qv };
+  const bulkDeleteFormId = "dataitem-bulk-delete-form";
 
   return (
     <>
@@ -262,6 +347,7 @@ export default async function DatasetDetailPage({
             </h2>
             <div className="action-group">
               <form action={`/datasets/${id}`} className="search-form compact">
+                <input type="hidden" name="pageSize" value={pageSize} />
                 <label className="input-icon-wrap compact">
                   <FilterIcon width={14} height={14} />
                   <input name="q" defaultValue={qv} placeholder="搜索 DataItems" />
@@ -270,11 +356,13 @@ export default async function DatasetDetailPage({
                   筛选
                 </button>
               </form>
+              <BulkSelectionControls formId={bulkDeleteFormId} variant="compact" confirmText="确认批量删除已选 {count} 条 DataItem 吗？" />
+              <PaginationControls basePath={`/datasets/${id}`} query={paginationQuery} total={total} page={page} pageSize={pageSize} position="top" variant="compact" />
               <a href={baseHref} className="icon-btn" aria-label="刷新">
                 <RefreshIcon width={16} height={16} />
               </a>
               <Link
-                href={qv ? `/datasets/${id}?q=${encodeURIComponent(qv)}&add=1` : `/datasets/${id}?add=1`}
+                href={buildDetailHref(id, qv, page, pageSize, { add: "1" })}
                 className="primary-btn"
               >
                 <PlusIcon width={16} height={16} /> 添加数据
@@ -283,9 +371,16 @@ export default async function DatasetDetailPage({
           </div>
 
           <div className="table-card" style={{ marginTop: 12 }}>
+            <form id={bulkDeleteFormId} action={bulkDeleteItem}>
+              <input type="hidden" name="datasetId" value={id} />
+              <input type="hidden" name="q" value={qv} />
+              <input type="hidden" name="page" value={page} />
+              <input type="hidden" name="pageSize" value={pageSize} />
+            </form>
             <table>
               <thead>
                 <tr>
+                  <th className="bulk-select-cell">选</th>
                   <th>ID</th>
                   <th>session_jsonl</th>
                   <th>input</th>
@@ -299,6 +394,9 @@ export default async function DatasetDetailPage({
               <tbody>
                 {items.rows.map((item) => (
                   <tr key={item.id}>
+                    <td className="bulk-select-cell">
+                      <input type="checkbox" name="selectedIds" value={item.id} form={bulkDeleteFormId} aria-label={`选择 DataItem ${item.id}`} />
+                    </td>
                     <td>
                       <code>{item.id}</code>
                     </td>
@@ -314,11 +412,7 @@ export default async function DatasetDetailPage({
                     <td>
                       <div className="row-actions">
                         <Link
-                          href={
-                            qv
-                              ? `/datasets/${id}?q=${encodeURIComponent(qv)}&edit=${item.id}`
-                              : `/datasets/${id}?edit=${item.id}`
-                          }
+                          href={buildDetailHref(id, qv, page, pageSize, { edit: String(item.id) })}
                           className="text-btn"
                         >
                           更新
@@ -326,6 +420,9 @@ export default async function DatasetDetailPage({
                         <form action={deleteItem}>
                           <input type="hidden" name="id" value={item.id} />
                           <input type="hidden" name="datasetId" value={id} />
+                          <input type="hidden" name="q" value={qv} />
+                          <input type="hidden" name="page" value={page} />
+                          <input type="hidden" name="pageSize" value={pageSize} />
                           <SubmitButton className="text-btn danger" pendingText="删除中...">
                             删除
                           </SubmitButton>
@@ -337,6 +434,8 @@ export default async function DatasetDetailPage({
               </tbody>
             </table>
           </div>
+          <BulkSelectionControls formId={bulkDeleteFormId} variant="full" confirmText="确认批量删除已选 {count} 条 DataItem 吗？" />
+          <PaginationControls basePath={`/datasets/${id}`} query={paginationQuery} total={total} page={page} pageSize={pageSize} position="bottom" />
         </section>
       </div>
 
@@ -345,6 +444,8 @@ export default async function DatasetDetailPage({
           <form id={itemEditorFormId} action={editingItem ? updateItem : createItem} className="drawer-form form-tone-green">
             <input type="hidden" name="datasetId" value={id} />
             <input type="hidden" name="q" value={qv} />
+            <input type="hidden" name="page" value={page} />
+            <input type="hidden" name="pageSize" value={pageSize} />
             {editingItem ? <input type="hidden" name="itemId" value={editingItem.id} /> : null}
 
             <FormField title="input" typeLabel="String" required>

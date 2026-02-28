@@ -44,6 +44,90 @@ class DbRepository:
             runtime_snapshot=runtime_snapshot,
         )
 
+    def get_experiment_queue_state(self, experiment_id: int) -> tuple[str | None, str | None]:
+        if self.settings.database_engine == "postgres":
+            return self._get_experiment_queue_state_postgres(experiment_id)
+        return self._get_experiment_queue_state_mysql(experiment_id)
+
+    def mark_cases_running(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        if not run_case_ids:
+            return
+        if self.settings.database_engine == "postgres":
+            self._mark_cases_running_postgres(experiment_id=experiment_id, run_case_ids=run_case_ids)
+            return
+        self._mark_cases_running_mysql(experiment_id=experiment_id, run_case_ids=run_case_ids)
+
+    def _get_experiment_queue_state_postgres(self, experiment_id: int) -> tuple[str | None, str | None]:
+        try:
+            import psycopg  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("E_DB_DRIVER_MISSING: install psycopg[binary] for postgres persistence") from exc
+
+        if not (self.settings.postgres_server and self.settings.postgres_user and self.settings.postgres_db):
+            raise RuntimeError("E_DB_CONFIG_MISSING: postgres env vars are not configured")
+
+        dsn = (
+            f"host={self.settings.postgres_server} "
+            f"port={self.settings.postgres_port} "
+            f"user={self.settings.postgres_user} "
+            f"password={self.settings.postgres_password or ''} "
+            f"dbname={self.settings.postgres_db}"
+        )
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT queue_status, queue_message_id
+                    FROM experiments
+                    WHERE id = %s AND deleted_at IS NULL
+                    LIMIT 1
+                    """,
+                    (experiment_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None, None
+        queue_status = str(row[0]) if row[0] is not None else None
+        queue_message_id = str(row[1]) if row[1] is not None else None
+        return queue_status, queue_message_id
+
+    def _get_experiment_queue_state_mysql(self, experiment_id: int) -> tuple[str | None, str | None]:
+        try:
+            import pymysql  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("E_DB_DRIVER_MISSING: install pymysql for mysql persistence") from exc
+
+        if not (self.settings.mysql_server and self.settings.mysql_user and self.settings.mysql_db):
+            raise RuntimeError("E_DB_CONFIG_MISSING: mysql env vars are not configured")
+
+        conn = pymysql.connect(
+            host=self.settings.mysql_server,
+            port=self.settings.mysql_port,
+            user=self.settings.mysql_user,
+            password=self.settings.mysql_password or "",
+            database=self.settings.mysql_db,
+            autocommit=True,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT queue_status, queue_message_id
+                    FROM experiments
+                    WHERE id = %s AND deleted_at IS NULL
+                    LIMIT 1
+                    """,
+                    (experiment_id,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None, None
+        queue_status = str(row[0]) if row[0] is not None else None
+        queue_message_id = str(row[1]) if row[1] is not None else None
+        return queue_status, queue_message_id
+
     def _persist_case_result_postgres(
         self,
         *,
@@ -101,7 +185,9 @@ class DbRepository:
                     ),
                 )
                 cur.execute("DELETE FROM run_case_scores WHERE run_case_id = %s", (run_case_id,))
+                cur.execute("DELETE FROM evaluate_results WHERE run_case_id = %s", (run_case_id,))
                 for scorer in result.scorer_results:
+                    evaluator_id = int(scorer.get("evaluator_id") or 0)
                     cur.execute(
                         """
                         INSERT INTO run_case_scores(run_case_id, scorer_key, score, reason, raw_result_json)
@@ -115,6 +201,20 @@ class DbRepository:
                             json.dumps(scorer.get("raw_result", {})),
                         ),
                     )
+                    if evaluator_id > 0:
+                        cur.execute(
+                            """
+                            INSERT INTO evaluate_results(run_case_id, evaluator_id, score, reason, raw_result)
+                            VALUES (%s, %s, %s, %s, %s::jsonb)
+                            """,
+                            (
+                                run_case_id,
+                                evaluator_id,
+                                float(scorer.get("score", 0.0)),
+                                str(scorer.get("reason", "")),
+                                json.dumps(scorer.get("raw_result", {})),
+                            ),
+                        )
                 if result.scorer_results:
                     cur.execute(
                         "UPDATE run_cases SET final_score = (SELECT AVG(score) FROM run_case_scores WHERE run_case_id = %s) WHERE id = %s",
@@ -123,7 +223,44 @@ class DbRepository:
                 self._refresh_experiment_status_postgres(cur, experiment_id)
             conn.commit()
 
+    def _mark_cases_running_postgres(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        try:
+            import psycopg  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("E_DB_DRIVER_MISSING: install psycopg[binary] for postgres persistence") from exc
+
+        if not (self.settings.postgres_server and self.settings.postgres_user and self.settings.postgres_db):
+            raise RuntimeError("E_DB_CONFIG_MISSING: postgres env vars are not configured")
+
+        dsn = (
+            f"host={self.settings.postgres_server} "
+            f"port={self.settings.postgres_port} "
+            f"user={self.settings.postgres_user} "
+            f"password={self.settings.postgres_password or ''} "
+            f"dbname={self.settings.postgres_db}"
+        )
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE run_cases
+                       SET status = 'running',
+                           started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                           updated_at = CURRENT_TIMESTAMP
+                     WHERE experiment_id = %s
+                       AND id = ANY(%s)
+                       AND status = 'pending'
+                    """,
+                    (experiment_id, run_case_ids),
+                )
+                self._refresh_experiment_status_postgres(cur, experiment_id)
+            conn.commit()
+
     def _refresh_experiment_status_postgres(self, cur: Any, experiment_id: int) -> None:
+        cur.execute("SELECT queue_status FROM experiments WHERE id = %s LIMIT 1", (experiment_id,))
+        exp_row = cur.fetchone()
+        if exp_row and exp_row[0] in {"manual_terminated", "test_case"}:
+            return
         cur.execute(
             """
             SELECT
@@ -151,11 +288,12 @@ class DbRepository:
             """
             UPDATE experiments
                SET queue_status = %s,
+                   started_at = CASE WHEN %s = 'consuming' AND started_at IS NULL THEN CURRENT_TIMESTAMP ELSE started_at END,
                    finished_at = CASE WHEN %s IN ('done', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END,
                    updated_at = CURRENT_TIMESTAMP
              WHERE id = %s
             """,
-            (run_status, run_status, experiment_id),
+            (run_status, run_status, run_status, experiment_id),
         )
 
     def _persist_case_result_mysql(
@@ -223,7 +361,9 @@ class DbRepository:
                     ),
                 )
                 cur.execute("DELETE FROM run_case_scores WHERE run_case_id = %s", (run_case_id,))
+                cur.execute("DELETE FROM evaluate_results WHERE run_case_id = %s", (run_case_id,))
                 for scorer in result.scorer_results:
+                    evaluator_id = int(scorer.get("evaluator_id") or 0)
                     cur.execute(
                         """
                         INSERT INTO run_case_scores(run_case_id, scorer_key, score, reason, raw_result_json)
@@ -237,6 +377,20 @@ class DbRepository:
                             json.dumps(scorer.get("raw_result", {})),
                         ),
                     )
+                    if evaluator_id > 0:
+                        cur.execute(
+                            """
+                            INSERT INTO evaluate_results(run_case_id, evaluator_id, score, reason, raw_result)
+                            VALUES (%s, %s, %s, %s, %s)
+                            """,
+                            (
+                                run_case_id,
+                                evaluator_id,
+                                float(scorer.get("score", 0.0)),
+                                str(scorer.get("reason", "")),
+                                json.dumps(scorer.get("raw_result", {})),
+                            ),
+                        )
                 if result.scorer_results:
                     cur.execute(
                         "UPDATE run_cases SET final_score = (SELECT AVG(score) FROM run_case_scores WHERE run_case_id = %s) WHERE id = %s",
@@ -246,6 +400,102 @@ class DbRepository:
             conn.commit()
         finally:
             conn.close()
+
+    def _mark_cases_running_mysql(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        try:
+            import pymysql  # type: ignore
+        except Exception as exc:
+            logger.warning("code=E_DB_DRIVER_FALLBACK driver=pymysql err=%s", exc)
+            self._mark_cases_running_mysql_cli(experiment_id=experiment_id, run_case_ids=run_case_ids)
+            return
+
+        if not (self.settings.mysql_server and self.settings.mysql_user and self.settings.mysql_db):
+            raise RuntimeError("E_DB_CONFIG_MISSING: mysql env vars are not configured")
+
+        conn = pymysql.connect(
+            host=self.settings.mysql_server,
+            port=self.settings.mysql_port,
+            user=self.settings.mysql_user,
+            password=self.settings.mysql_password or "",
+            database=self.settings.mysql_db,
+            autocommit=False,
+        )
+        try:
+            with conn.cursor() as cur:
+                placeholders = ", ".join(["%s"] * len(run_case_ids))
+                cur.execute(
+                    f"""
+                    UPDATE run_cases
+                       SET status = 'running',
+                           started_at = IFNULL(started_at, CURRENT_TIMESTAMP),
+                           updated_at = CURRENT_TIMESTAMP
+                     WHERE experiment_id = %s
+                       AND id IN ({placeholders})
+                       AND status = 'pending'
+                    """,
+                    [experiment_id, *run_case_ids],
+                )
+                self._refresh_experiment_status_mysql(cur, experiment_id)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _mark_cases_running_mysql_cli(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        if not (self.settings.mysql_server and self.settings.mysql_user and self.settings.mysql_db):
+            raise RuntimeError("E_DB_CONFIG_MISSING: mysql env vars are not configured")
+        if self.settings.mysql_password is None:
+            raise RuntimeError("E_DB_CONFIG_MISSING: MYSQL_PASSWORD is not configured")
+
+        def lit(value: Any) -> str:
+            if value is None:
+                return "NULL"
+            if isinstance(value, bool):
+                return "1" if value else "0"
+            if isinstance(value, (int, float)):
+                return str(value)
+            text = str(value)
+            text = text.replace("\\", "\\\\").replace("'", "\\'")
+            return f"'{text}'"
+
+        ids_sql = ", ".join(lit(v) for v in run_case_ids)
+        sql = (
+            "START TRANSACTION;\n"
+            "UPDATE run_cases SET "
+            "status='running', "
+            "started_at=IFNULL(started_at, CURRENT_TIMESTAMP), "
+            "updated_at=CURRENT_TIMESTAMP "
+            f"WHERE experiment_id={lit(experiment_id)} "
+            f"AND id IN ({ids_sql}) "
+            "AND status='pending';\n"
+            "UPDATE experiments SET "
+            "queue_status='consuming', "
+            "started_at=IF(started_at IS NULL, CURRENT_TIMESTAMP, started_at), "
+            "updated_at=CURRENT_TIMESTAMP "
+            f"WHERE id={lit(experiment_id)};\n"
+            "COMMIT;"
+        )
+        env = dict(os.environ)
+        env["MYSQL_PWD"] = self.settings.mysql_password
+        proc = subprocess.run(
+            [
+                "mysql",
+                "-h",
+                self.settings.mysql_server,
+                "-P",
+                str(self.settings.mysql_port),
+                "-u",
+                self.settings.mysql_user,
+                self.settings.mysql_db,
+                "-e",
+                sql,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"E_DB_MARK_RUNNING_CLI: {proc.stderr.strip()}")
 
     def _persist_case_result_mysql_cli(
         self,
@@ -289,8 +539,10 @@ class DbRepository:
                 f"WHERE id={lit(run_case_id)}"
             ),
             f"DELETE FROM run_case_scores WHERE run_case_id={lit(run_case_id)}",
+            f"DELETE FROM evaluate_results WHERE run_case_id={lit(run_case_id)}",
         ]
         for scorer in result.scorer_results:
+            evaluator_id = int(scorer.get("evaluator_id") or 0)
             sql_parts.append(
                 "INSERT INTO run_case_scores(run_case_id, scorer_key, score, reason, raw_result_json) VALUES ("
                 f"{lit(run_case_id)}, "
@@ -300,6 +552,16 @@ class DbRepository:
                 f"{lit(json.dumps(scorer.get('raw_result', {})))}"
                 ")"
             )
+            if evaluator_id > 0:
+                sql_parts.append(
+                    "INSERT INTO evaluate_results(run_case_id, evaluator_id, score, reason, raw_result) VALUES ("
+                    f"{lit(run_case_id)}, "
+                    f"{lit(evaluator_id)}, "
+                    f"{lit(float(scorer.get('score', 0.0)))}, "
+                    f"{lit(str(scorer.get('reason', '')))}, "
+                    f"{lit(json.dumps(scorer.get('raw_result', {})))}"
+                    ")"
+                )
         if result.scorer_results:
             sql_parts.append(
                 f"UPDATE run_cases SET final_score=(SELECT AVG(score) FROM run_case_scores WHERE run_case_id={lit(run_case_id)}) WHERE id={lit(run_case_id)}"
@@ -337,6 +599,7 @@ class DbRepository:
                 (
                     "UPDATE experiments SET "
                     "queue_status=@run_status, "
+                    "started_at=IF(@run_status='consuming' AND started_at IS NULL, CURRENT_TIMESTAMP, started_at), "
                     "finished_at=IF(@run_status IN ('done','failed'), CURRENT_TIMESTAMP, finished_at), "
                     "updated_at=CURRENT_TIMESTAMP "
                     f"WHERE id={lit(experiment_id)}"
@@ -369,6 +632,10 @@ class DbRepository:
             raise RuntimeError(f"E_DB_PERSIST_CLI: {proc.stderr.strip()}")
 
     def _refresh_experiment_status_mysql(self, cur: Any, experiment_id: int) -> None:
+        cur.execute("SELECT queue_status FROM experiments WHERE id = %s LIMIT 1", (experiment_id,))
+        exp_row = cur.fetchone()
+        if exp_row and exp_row[0] in {"manual_terminated", "test_case"}:
+            return
         cur.execute(
             """
             SELECT
@@ -397,9 +664,10 @@ class DbRepository:
             """
             UPDATE experiments
                SET queue_status = %s,
+                   started_at = IF(%s = 'consuming' AND started_at IS NULL, CURRENT_TIMESTAMP, started_at),
                    finished_at = IF(%s IN ('done', 'failed'), CURRENT_TIMESTAMP, finished_at),
                    updated_at = CURRENT_TIMESTAMP
              WHERE id = %s
             """,
-            (run_status, run_status, experiment_id),
+            (run_status, run_status, run_status, experiment_id),
         )

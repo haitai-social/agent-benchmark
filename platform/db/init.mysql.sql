@@ -35,8 +35,10 @@ CREATE TABLE IF NOT EXISTS evaluators (
   evaluator_key VARCHAR(255) NOT NULL UNIQUE,
   name VARCHAR(255) NOT NULL,
   prompt_template TEXT NOT NULL,
-  base_url VARCHAR(1024) NOT NULL DEFAULT 'https://api.openai.com/v1',
-  model_name VARCHAR(255) NOT NULL DEFAULT 'gpt-4.1-mini',
+  base_url VARCHAR(1024) NOT NULL DEFAULT 'https://ark.cn-beijing.volces.com/api/coding/v3',
+  model_name VARCHAR(255) NOT NULL DEFAULT 'deepseek-v3.2',
+  api_style VARCHAR(32) NOT NULL DEFAULT 'anthropic',
+  api_key VARCHAR(1024) NOT NULL DEFAULT '',
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
   is_deleted TINYINT(1) NOT NULL DEFAULT 0,
@@ -45,6 +47,26 @@ CREATE TABLE IF NOT EXISTS evaluators (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_evaluators_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @ev_has_api_style := (
+  SELECT COUNT(*)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'evaluators' AND column_name = 'api_style'
+);
+SET @ev_sql := IF(@ev_has_api_style = 0, 'ALTER TABLE evaluators ADD COLUMN api_style VARCHAR(32) NOT NULL DEFAULT ''anthropic'' AFTER model_name', 'SELECT 1');
+PREPARE ev_stmt FROM @ev_sql;
+EXECUTE ev_stmt;
+DEALLOCATE PREPARE ev_stmt;
+
+SET @ev_has_api_key := (
+  SELECT COUNT(*)
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'evaluators' AND column_name = 'api_key'
+);
+SET @ev_sql := IF(@ev_has_api_key = 0, 'ALTER TABLE evaluators ADD COLUMN api_key VARCHAR(1024) NOT NULL DEFAULT '''' AFTER api_style', 'SELECT 1');
+PREPARE ev_stmt FROM @ev_sql;
+EXECUTE ev_stmt;
+DEALLOCATE PREPARE ev_stmt;
 
 CREATE TABLE IF NOT EXISTS traces (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -259,7 +281,7 @@ CREATE TABLE IF NOT EXISTS evaluate_results (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Seed evaluators
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('task_success', '任务成功', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('task_success', '任务成功', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
 
         <评判标准>
         请忽略工具参数的具体设置，合适的工具应满足：
@@ -298,10 +320,10 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
 	        - 受阻求助：页面无响应或权限限制时，call_user 合理；若无阻碍却滥用 → 记为问题。
 	        - 若实际去调用 login → 捏造工具（硬失败）；
 	        - 若出现真实登录表单但未调用 login、改用 type 输入账号密码 → 策略红线（硬失败）。
-	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://api.openai.com/v1', 'gpt-4.1-mini', 'system', 'system')
-ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://ark.cn-beijing.volces.com/api/coding/v3', 'deepseek-v3.2', 'anthropic', '', 'system', 'system')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), api_style = VALUES(api_style), updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('trajectory_quality', '轨迹质量', '你是一名专业的数据标注员/审稿员，专门评估计算机使用类（CUA）Agent的交互轨迹是否逻辑正确、推进清晰、目标达成。你将收到一段包含系统指令、用户目标、Agent 的思考（thought，可选）、动作（function calls）与若干屏幕截图的轨迹。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('trajectory_quality', '轨迹质量', '你是一名专业的数据标注员/审稿员，专门评估计算机使用类（CUA）Agent的交互轨迹是否逻辑正确、推进清晰、目标达成。你将收到一段包含系统指令、用户目标、Agent 的思考（thought，可选）、动作（function calls）与若干屏幕截图的轨迹。
         
         <评分标准>
         请先给出六个子分（0~1），再折算到总分，并映射到三档标注（1.0 / 0.5 / 0.0）。
@@ -358,10 +380,10 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
 	        2. 动作：主要体现为函数调用（如：click/left_double_click/type/wait/login 等）。
 	        3. 截图：role为user的输入里，以 image_url 形式出现，代表每次CU(Computor Use)动作执行后的环境状态（若动作后无截图，使用最接近的下一张作为“结果”）。
         首先，请通过查看输入内容，来理解该轨迹的目标、路径和结果。一旦你理解了目标，请一步步思考，根据该轨迹实现该目标的程度进行评分。
-        </思考指导>', 'https://api.openai.com/v1', 'gpt-4.1-mini', 'system', 'system')
-ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+        </思考指导>', 'https://ark.cn-beijing.volces.com/api/coding/v3', 'deepseek-v3.2', 'anthropic', '', 'system', 'system')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), api_style = VALUES(api_style), updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('tool_selection_quality', '工具选择质量', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('tool_selection_quality', '工具选择质量', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
 
         <评判标准>
         请忽略工具参数的具体设置，合适的工具应满足：
@@ -399,10 +421,10 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
 	        - 受阻求助：页面无响应或权限限制时，call_user 合理；若无阻碍却滥用 → 记为问题。
 	        - 若实际去调用 login → 捏造工具（硬失败）；
 	        - 若出现真实登录表单但未调用 login、改用 type 输入账号密码 → 策略红线（硬失败）。
-	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://api.openai.com/v1', 'gpt-4.1-mini', 'system', 'system')
-ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://ark.cn-beijing.volces.com/api/coding/v3', 'deepseek-v3.2', 'anthropic', '', 'system', 'system')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), api_style = VALUES(api_style), updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('tool_params', '工具参数', '请将AI 助手生成的工具调用中提取的参数与下方提供的 JSON 进行比较，一步步思考，以判断生成的调用是否从问题中提取了完全正确的参数。 [工具定义列表]中给出了当前调用工具的信息，包括工具作用、所需参数等信息。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('tool_params', '工具参数', '请将AI 助手生成的工具调用中提取的参数与下方提供的 JSON 进行比较，一步步思考，以判断生成的调用是否从问题中提取了完全正确的参数。 [工具定义列表]中给出了当前调用工具的信息，包括工具作用、所需参数等信息。
 
         <评判标准>
         只有当工具调用中的所有参数均与输入中提供的[工具定义列表]中完全一致，且只提供了相关的信息，才视为“正确”。例如：
@@ -436,5 +458,5 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
         首先，请通过查看输入的上下文理解用户的真实意图。如果输入中没有明确表达意图，请尝试从上下文或消息内容中合理推断。一旦你理解了目标，再将每个参数结合意图，一步步分析是否填写正确。
         对于参数值，一个一个列出来，然后检查参数值是不是在上下文中真的有提到，且符合意图。根据Prompt 中的评判标准一步步思考、分析，满足评判标准就是 1 分，否则就是 0 分。
         评估的对象也包含[历史轨迹中的工具调用]
-        </思考指导>', 'https://api.openai.com/v1', 'gpt-4.1-mini', 'system', 'system')
-ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+        </思考指导>', 'https://ark.cn-beijing.volces.com/api/coding/v3', 'deepseek-v3.2', 'anthropic', '', 'system', 'system')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), api_style = VALUES(api_style), updated_at = CURRENT_TIMESTAMP;

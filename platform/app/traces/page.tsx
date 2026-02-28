@@ -1,6 +1,10 @@
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { PaginationControls } from "@/app/components/pagination-controls";
+import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
 import { ingestTracePayload } from "@/lib/otel";
+import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
+import { parseSelectedIds } from "@/lib/form-ids";
 import { parseJsonOrWrap } from "@/lib/safe-json";
 import { requireUser } from "@/lib/supabase-auth";
 import Link from "next/link";
@@ -15,10 +19,12 @@ import {
 import { SubmitButton } from "../components/submit-button";
 import { TextareaWithFileUpload } from "../components/textarea-with-file-upload";
 
-function buildListHref(q: string, service: string, extras?: Record<string, string>) {
+function buildListHref(q: string, service: string, page: number, pageSize: number, extras?: Record<string, string>) {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (service !== "all") params.set("service", service);
+  if (page > 1) params.set("page", String(page));
+  if (pageSize !== 10) params.set("pageSize", String(pageSize));
   for (const [key, value] of Object.entries(extras ?? {})) {
     if (value) params.set(key, value);
   }
@@ -40,9 +46,13 @@ async function ingestManualTrace(formData: FormData) {
   const payloadRaw = String(formData.get("payload") ?? "{}");
   const q = String(formData.get("q") ?? "").trim();
   const service = String(formData.get("service") ?? "all").trim() || "all";
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
   const nextParams = new URLSearchParams();
   if (q) nextParams.set("q", q);
   if (service !== "all") nextParams.set("service", service);
+  if (page > 1) nextParams.set("page", String(page));
+  if (pageSize !== 10) nextParams.set("pageSize", String(pageSize));
   nextParams.set("panel", "ingest");
   try {
     const payload = JSON.parse(payloadRaw) as Record<string, unknown>;
@@ -75,6 +85,8 @@ async function updateTrace(formData: FormData) {
   const rawValue = String(formData.get("raw") ?? "{}");
   const q = String(formData.get("q") ?? "").trim();
   const service = String(formData.get("service") ?? "all").trim() || "all";
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   if (!idRaw || !Number.isInteger(id) || id <= 0 || !name) return;
 
@@ -110,7 +122,7 @@ async function updateTrace(formData: FormData) {
   );
 
   revalidatePath("/traces");
-  redirect(buildListHref(q, service));
+  redirect(buildListHref(q, service, page, pageSize));
 }
 
 async function deleteTrace(formData: FormData) {
@@ -121,8 +133,16 @@ async function deleteTrace(formData: FormData) {
   const id = Number(idRaw);
   const q = String(formData.get("q") ?? "").trim();
   const service = String(formData.get("service") ?? "all").trim() || "all";
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
 
+  await softDeleteTraceById(id);
+  revalidatePath("/traces");
+  redirect(buildListHref(q, service, page, pageSize));
+}
+
+async function softDeleteTraceById(id: number) {
   await dbQuery(
     `UPDATE traces
      SET is_deleted = TRUE,
@@ -130,24 +150,52 @@ async function deleteTrace(formData: FormData) {
      WHERE id = $1 AND deleted_at IS NULL`,
     [id]
   );
+}
 
+async function bulkDeleteTrace(formData: FormData) {
+  "use server";
+  await requireUser();
+
+  const ids = parseSelectedIds(formData);
+  const q = String(formData.get("q") ?? "").trim();
+  const service = String(formData.get("service") ?? "all").trim() || "all";
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
+  if (ids.length <= 0) return;
+
+  for (const id of ids) {
+    await softDeleteTraceById(id);
+  }
   revalidatePath("/traces");
-  redirect(buildListHref(q, service));
+  redirect(buildListHref(q, service, page, pageSize));
 }
 
 export default async function TracesPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; service?: string; panel?: string; id?: string; result?: string; inserted?: string; message?: string }>;
+  searchParams: Promise<{ q?: string; service?: string; panel?: string; id?: string; result?: string; inserted?: string; message?: string; page?: string; pageSize?: string }>;
 }) {
   await requireUser();
 
-  const { q = "", service = "all", panel = "none", id = "", result = "", inserted = "", message = "" } = await searchParams;
+  const { q = "", service = "all", panel = "none", id = "", result = "", inserted = "", message = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
   const qv = q.trim();
+  const pageSize = parsePageSize(pageSizeRaw);
+  const requestedPage = parsePage(pageRaw);
   const ingesting = panel === "ingest";
   const detailIdRaw = id.trim();
   const detailId = detailIdRaw ? Number(detailIdRaw) : 0;
-  const listHref = buildListHref(qv, service);
+  const countResult = await dbQuery<{ total_count: number | string }>(
+    `SELECT COUNT(*) AS total_count
+     FROM traces
+     WHERE ($1 = '' OR LOWER(COALESCE(trace_id, '')) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(name) LIKE CONCAT('%', LOWER($3), '%'))
+       AND deleted_at IS NULL
+       AND ($4 = 'all' OR COALESCE(service_name, '-') = $5)`,
+    [qv, qv, qv, service, service]
+  );
+  const total = Number(countResult.rows[0]?.total_count ?? 0);
+  const page = clampPage(requestedPage, total, pageSize);
+  const offset = getOffset(page, pageSize);
+  const listHref = buildListHref(qv, service, page, pageSize);
   const ingestHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=ingest`;
 
   const [traces, serviceRows, detailTraceRows] = await Promise.all([
@@ -165,8 +213,9 @@ export default async function TracesPage({
        WHERE ($1 = '' OR LOWER(COALESCE(trace_id, '')) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(name) LIKE CONCAT('%', LOWER($3), '%'))
          AND deleted_at IS NULL
          AND ($4 = 'all' OR COALESCE(service_name, '-') = $5)
-       ORDER BY id DESC LIMIT 100`,
-      [qv, qv, qv, service, service]
+       ORDER BY id DESC
+       LIMIT $6 OFFSET $7`,
+      [qv, qv, qv, service, service, pageSize, offset]
     ),
     dbQuery<{ service_name: string }>(
       `SELECT COALESCE(service_name, '-') AS service_name
@@ -201,6 +250,8 @@ export default async function TracesPage({
   const services = serviceRows.rows.map((t) => t.service_name);
   const editing = detailTraceRows.rows[0];
   const showEditor = panel === "detail" && Boolean(editing);
+  const paginationQuery = { q: qv, service: service === "all" ? "" : service };
+  const bulkDeleteFormId = "trace-bulk-delete-form";
 
   return (
     <div className="grid">
@@ -212,6 +263,7 @@ export default async function TracesPage({
 
       <section className="toolbar-row">
         <form action="/traces" className="search-form">
+          <input type="hidden" name="pageSize" value={pageSize} />
           <label className="input-icon-wrap">
             <SearchIcon width={16} height={16} />
             <input name="q" defaultValue={qv} placeholder="搜索 trace id 或 span name" />
@@ -233,6 +285,8 @@ export default async function TracesPage({
         </form>
 
         <div className="action-group">
+          <BulkSelectionControls formId={bulkDeleteFormId} variant="compact" confirmText="确认批量删除已选 {count} 条 Trace 吗？" />
+          <PaginationControls basePath="/traces" query={paginationQuery} total={total} page={page} pageSize={pageSize} position="top" variant="compact" />
           <a href={listHref || "/traces"} className="icon-btn" aria-label="刷新">
             <RefreshIcon width={16} height={16} />
           </a>
@@ -252,9 +306,16 @@ export default async function TracesPage({
             OTel Endpoint: <code>POST /api/otel/v1/traces</code>
           </span>
         </div>
+        <form id={bulkDeleteFormId} action={bulkDeleteTrace}>
+          <input type="hidden" name="q" value={qv} />
+          <input type="hidden" name="service" value={service} />
+          <input type="hidden" name="page" value={page} />
+          <input type="hidden" name="pageSize" value={pageSize} />
+        </form>
         <table>
           <thead>
             <tr>
+              <th className="bulk-select-cell">选</th>
               <th>ID</th>
               <th>TraceID/SpanID</th>
               <th>Name</th>
@@ -267,6 +328,9 @@ export default async function TracesPage({
           <tbody>
             {traces.rows.map((row) => (
               <tr key={row.id}>
+                <td className="bulk-select-cell">
+                  <input type="checkbox" name="selectedIds" value={row.id} form={bulkDeleteFormId} aria-label={`选择 Trace ${row.id}`} />
+                </td>
                 <td>{row.id}</td>
                 <td>
                   <div><code>{row.trace_id ?? "-"}</code></div>
@@ -288,6 +352,8 @@ export default async function TracesPage({
                       <input type="hidden" name="id" value={row.id} />
                       <input type="hidden" name="q" value={qv} />
                       <input type="hidden" name="service" value={service} />
+                      <input type="hidden" name="page" value={page} />
+                      <input type="hidden" name="pageSize" value={pageSize} />
                       <SubmitButton className="text-btn danger" pendingText="删除中...">
                         删除
                       </SubmitButton>
@@ -298,6 +364,8 @@ export default async function TracesPage({
             ))}
           </tbody>
         </table>
+        <BulkSelectionControls formId={bulkDeleteFormId} variant="full" confirmText="确认批量删除已选 {count} 条 Trace 吗？" />
+        <PaginationControls basePath="/traces" query={paginationQuery} total={total} page={page} pageSize={pageSize} position="bottom" />
       </section>
 
       {showEditor ? (
@@ -315,6 +383,8 @@ export default async function TracesPage({
                 <input type="hidden" name="id" value={editing.id} />
                 <input type="hidden" name="q" value={qv} />
                 <input type="hidden" name="service" value={service} />
+                <input type="hidden" name="page" value={page} />
+                <input type="hidden" name="pageSize" value={pageSize} />
                 <div className="field-group">
                   <label className="field-head">
                     <span className="field-title required">Span Name</span>
@@ -402,6 +472,8 @@ export default async function TracesPage({
                   <input type="hidden" name="id" value={editing.id} />
                   <input type="hidden" name="q" value={qv} />
                   <input type="hidden" name="service" value={service} />
+                  <input type="hidden" name="page" value={page} />
+                  <input type="hidden" name="pageSize" value={pageSize} />
                   <SubmitButton className="danger-btn" pendingText="删除中...">
                     删除
                   </SubmitButton>
@@ -439,6 +511,8 @@ export default async function TracesPage({
               <form action={ingestManualTrace} className="menu-form form-tone-green">
                 <input type="hidden" name="q" value={qv} />
                 <input type="hidden" name="service" value={service} />
+                <input type="hidden" name="page" value={page} />
+                <input type="hidden" name="pageSize" value={pageSize} />
                 <div className="field-group">
                   <label className="field-head">
                     <span className="field-title required">Payload JSON</span>
