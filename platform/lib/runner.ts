@@ -162,7 +162,9 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
       scorer_config: {
         prompt_template: item.prompt_template,
         base_url: item.base_url,
-        model_name: item.model_name
+        model_name: item.model_name,
+        api_style: item.api_style,
+        api_key: item.api_key
       }
     }));
 
@@ -345,7 +347,9 @@ export async function retryFailedRunCases(experimentId: number, _triggeredBy: st
       scorer_config: {
         prompt_template: item.prompt_template,
         base_url: item.base_url,
-        model_name: item.model_name
+        model_name: item.model_name,
+        api_style: item.api_style,
+        api_key: item.api_key
       }
     }));
 
