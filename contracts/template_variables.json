@@ -1,0 +1,150 @@
+{
+  "version": 1,
+  "groups": {
+    "evaluator_prompt": {
+      "title": "Evaluator Prompt Template Variables",
+      "variables": [
+        {
+          "path": "data_item.id",
+          "description": "当前样本的数据项 ID",
+          "example": "123"
+        },
+        {
+          "path": "data_item.input",
+          "description": "数据项的 user_input 文本",
+          "example": "请帮我查一下今天北京天气"
+        },
+        {
+          "path": "data_item.session",
+          "description": "历史会话 session_jsonl",
+          "example": "[{\"role\":\"user\",\"content\":\"hi\"}]"
+        },
+        {
+          "path": "data_item.trajectory",
+          "description": "数据项参考轨迹（若存在）",
+          "example": "[{\"step\":1,\"action\":\"open_url\"}]"
+        },
+        {
+          "path": "data_item.output",
+          "description": "数据项参考输出（若存在）",
+          "example": "{\"answer\":\"ok\"}"
+        },
+        {
+          "path": "data_item.trace_id",
+          "description": "数据项关联 trace_id",
+          "example": "b9c2f0f3f83b4cf4a9f2f403b7e8e9ab"
+        },
+        {
+          "path": "run.output",
+          "description": "Agent 运行输出",
+          "example": "{\"final_answer\":\"...\"}"
+        },
+        {
+          "path": "run.trajectory",
+          "description": "Agent 运行轨迹",
+          "example": "[{\"tool\":\"click\"}]"
+        },
+        {
+          "path": "run.status",
+          "description": "Run Case 状态",
+          "example": "success"
+        },
+        {
+          "path": "run.logs",
+          "description": "运行日志",
+          "example": "[case-exec] ..."
+        },
+        {
+          "path": "run.latency_ms",
+          "description": "运行耗时（毫秒）",
+          "example": "1450"
+        },
+        {
+          "path": "tools",
+          "description": "评估上下文中的工具定义/列表",
+          "example": "[{\"name\":\"click\"}]"
+        }
+      ]
+    },
+    "agent_runtime_commands": {
+      "title": "Agent Runtime Command Template Variables",
+      "applies_to_fields": [
+        "sandbox_start_command",
+        "case_exec_command",
+        "after_exec_command"
+      ],
+      "variables": [
+        {
+          "path": "experiment.id",
+          "description": "当前 experiment ID",
+          "example": "90"
+        },
+        {
+          "path": "dataset.id",
+          "description": "当前 dataset ID",
+          "example": "12"
+        },
+        {
+          "path": "dataset.name",
+          "description": "当前 dataset 名称",
+          "example": "OpenClaw OTEL Demo"
+        },
+        {
+          "path": "agent.id",
+          "description": "当前 agent ID",
+          "example": "33"
+        },
+        {
+          "path": "agent.name",
+          "description": "当前 agent 名称",
+          "example": "MockOutput and OTEL"
+        },
+        {
+          "path": "agent.agent_key",
+          "description": "当前 agent_key",
+          "example": "mock-output-otel"
+        },
+        {
+          "path": "agent.version",
+          "description": "当前 agent version",
+          "example": "v1"
+        },
+        {
+          "path": "run_case.run_case_id",
+          "description": "当前 run_case ID",
+          "example": "196"
+        },
+        {
+          "path": "run_case.data_item_id",
+          "description": "当前 run_case 对应 data_item_id",
+          "example": "458"
+        },
+        {
+          "path": "run_case.attempt_no",
+          "description": "当前 run_case 尝试次数",
+          "example": "1"
+        },
+        {
+          "path": "run_case.user_input",
+          "description": "当前 run_case 的 user_input",
+          "example": "请打开浏览器并搜索 OpenTelemetry"
+        },
+        {
+          "path": "run_case.session_jsonl",
+          "description": "当前 run_case 的 session_jsonl",
+          "example": "[{\"role\":\"user\",\"content\":\"...\"}]"
+        },
+        {
+          "path": "run_case.trace_id",
+          "description": "当前 run_case trace_id（无则为空字符串）",
+          "example": "c2c9d8d35ec74c8d9f0e86b4d3f5e7a1"
+        },
+        {
+          "path": "mock.base_url",
+          "description": "当前 run_case mock sidecar 基础地址（无则为空字符串）",
+          "example": "http://host.docker.internal:42031"
+        }
+      ]
+    }
+  }
+}

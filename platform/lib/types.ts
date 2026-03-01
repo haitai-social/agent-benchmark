@@ -11,8 +11,7 @@ export type DataItem = {
   session_jsonl: string;
   user_input: string;
   reference_output: unknown;
-  trace_id: string | null;
-  reference_trajectory: unknown | null;
+  mock_config?: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -23,6 +22,8 @@ export type Evaluator = {
   prompt_template: string;
   base_url: string;
   model_name: string;
+  api_style: string;
+  api_key: string;
 };
 
 export type Agent = {
@@ -31,10 +32,7 @@ export type Agent = {
   version: string;
   name: string;
   description: string;
-  docker_image: string;
-  openapi_spec: Record<string, unknown>;
-  status: string;
-  metadata: Record<string, unknown>;
+  runtime_spec_json: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 };

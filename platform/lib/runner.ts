@@ -1,5 +1,5 @@
 import { dbQuery, engine, withTransaction } from "./db";
-import { listEvaluatorsForExperiment, scoreByEvaluatorList } from "./judges";
+import { listEvaluatorsForExperiment } from "./judges";
 import { publishExperimentRunRequested } from "./rabbitmq";
 
 type ExperimentContext = {
@@ -8,25 +8,24 @@ type ExperimentContext = {
   agent_id: number;
   agent_key: string;
   agent_version: string;
-  docker_image: string;
+  runtime_spec_json: Record<string, unknown>;
   queue_status: string;
 };
 
 type RunCaseInput = {
   id: number;
   user_input: string;
-  reference_trajectory: unknown;
   reference_output: unknown;
 };
 
 type DataItemForRun = RunCaseInput & {
   session_jsonl: string;
-  trace_id: string | null;
 };
 
 type ExperimentDispatchReady = {
   kind: "ready";
   runCaseCount: number;
+  previousQueueStatus: "idle" | "manual_terminated";
   experiment: {
     id: number;
   };
@@ -39,21 +38,19 @@ type ExperimentDispatchReady = {
     name: string;
     agent_key: string;
     version: string;
-    docker_image: string;
-    openapi_spec: unknown;
-    metadata: unknown;
+    runtime_spec_json: Record<string, unknown>;
   };
-  evaluators: Array<{ id: number; evaluator_key: string; name: string; prompt_template: string; base_url: string; model_name: string }>;
+  scorers: Array<{ id: number; scorer_key: string; name: string; scorer_config: Record<string, unknown> }>;
   runCases: Array<{
     run_case_id: number;
     data_item_id: number;
     attempt_no: number;
     session_jsonl: string;
     user_input: string;
-    trace_id: string | null;
-    reference_trajectory: unknown;
     reference_output: unknown;
   }>;
+  newRunCaseIds: number[];
+  replacedPairs: Array<{ oldRunCaseId: number; newRunCaseId: number }>;
 };
 
 type ExperimentDispatchEmpty = {
@@ -81,6 +78,18 @@ async function insertAndGetId(tx: Tx, text: string, params: unknown[]) {
 }
 
 async function updateExperimentStatus(tx: Tx, experimentId: number) {
+  const experiment = await tx.query<{ queue_status: string }>(
+    `SELECT queue_status
+     FROM experiments
+     WHERE id = $1 AND deleted_at IS NULL
+     LIMIT 1`,
+    [experimentId]
+  );
+  if (experiment.rows.length === 0) return;
+  if (experiment.rows[0].queue_status === "manual_terminated") {
+    return;
+  }
+
   const summary = await tx.query<{
     total_count: number | string;
     running_count: number | string;
@@ -90,10 +99,10 @@ async function updateExperimentStatus(tx: Tx, experimentId: number) {
   }>(
     `SELECT
        COUNT(*) AS total_count,
-       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
-       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+       SUM(CASE WHEN status IN ('running','trajectory','scoring') THEN 1 ELSE 0 END) AS running_count,
+       SUM(CASE WHEN status IN ('pending','queued') THEN 1 ELSE 0 END) AS pending_count,
        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+       SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END) AS failed_count
      FROM run_cases
      WHERE experiment_id = $1 AND is_latest = TRUE`,
     [experimentId]
@@ -133,89 +142,10 @@ async function updateExperimentStatus(tx: Tx, experimentId: number) {
   );
 }
 
-async function runOneCase(
-  tx: Tx,
-  experiment: ExperimentContext,
-  item: RunCaseInput,
-  attemptNo: number,
-  evaluators: Array<{ id: number; evaluator_key: string; name: string; prompt_template: string; base_url: string; model_name: string }>
-) {
-  const runCaseId = await insertAndGetId(
-    tx,
-    `INSERT INTO run_cases (
-      experiment_id, data_item_id, agent_id, attempt_no, is_latest, status,
-      started_at, created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, TRUE, 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    [experiment.id, item.id, experiment.agent_id, attemptNo]
-  );
-
-  if (!runCaseId) {
-    throw new Error(`Failed to create run_case for data_item=${item.id}`);
-  }
-
-  try {
-    const replayTrajectory = item.reference_trajectory ?? [];
-    const replayOutput = item.reference_output ?? {};
-    const startedMs = Date.now();
-
-    const judged = await scoreByEvaluatorList(evaluators, {
-      trajectory: replayTrajectory,
-      agentOutput: replayOutput,
-      tools: [],
-      userInput: item.user_input
-    });
-
-    for (const result of judged.results) {
-      await tx.query(
-        `INSERT INTO evaluate_results (run_case_id, evaluator_id, score, reason, raw_result)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [runCaseId, result.evaluatorId, result.score, result.reason, JSON.stringify(result.raw)]
-      );
-    }
-
-    const latency = Date.now() - startedMs;
-    await tx.query(
-      `UPDATE run_cases
-       SET status = 'success',
-           final_score = $2,
-           agent_trajectory = $3,
-           agent_output = $4,
-           latency_ms = $5,
-           input_tokens = $6,
-           output_tokens = $7,
-           logs = $8,
-           finished_at = CURRENT_TIMESTAMP,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
-      [
-        runCaseId,
-        judged.finalScore,
-        JSON.stringify(replayTrajectory),
-        JSON.stringify(replayOutput),
-        latency,
-        null,
-        null,
-        `agent=${experiment.agent_key}@${experiment.agent_version}; image=${experiment.docker_image}; mode=replay`
-      ]
-    );
-  } catch (error) {
-    await tx.query(
-      `UPDATE run_cases
-       SET status = 'failed',
-           error_message = $2,
-           logs = $3,
-           finished_at = CURRENT_TIMESTAMP,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
-      [runCaseId, error instanceof Error ? error.message : String(error), `agent=${experiment.agent_key}; error`]
-    );
-  }
-}
-
 export async function runExperiment(experimentId: number, _triggeredBy: string) {
   const dispatch: ExperimentDispatchResult = await withTransaction(async (tx) => {
     const exp = await tx.query<ExperimentContext>(
-      `SELECT e.id, e.dataset_id, e.agent_id, e.queue_status, a.agent_key, a.version AS agent_version, a.docker_image
+      `SELECT e.id, e.dataset_id, e.agent_id, e.queue_status, a.agent_key, a.version AS agent_version, a.runtime_spec_json
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
        JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
@@ -228,7 +158,7 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     }
 
     const experiment = exp.rows[0];
-    if (experiment.queue_status !== "idle") {
+    if (experiment.queue_status !== "idle" && experiment.queue_status !== "manual_terminated") {
       throw new Error("Experiment already started; use retry failed.");
     }
 
@@ -236,6 +166,18 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     if (evaluators.length === 0) {
       throw new Error("Experiment has no evaluators");
     }
+    const scorers = evaluators.map((item) => ({
+      id: item.id,
+      scorer_key: item.evaluator_key,
+      name: item.name,
+      scorer_config: {
+        prompt_template: item.prompt_template,
+        base_url: item.base_url,
+        model_name: item.model_name,
+        api_style: item.api_style,
+        api_key: item.api_key
+      }
+    }));
 
     await tx.query(
       `UPDATE experiments
@@ -258,8 +200,8 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
       throw new Error("Dataset not found");
     }
 
-    const agentRow = await tx.query<{ id: number; name: string; openapi_spec: unknown; metadata: unknown }>(
-      `SELECT id, name, openapi_spec, metadata FROM agents WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+    const agentRow = await tx.query<{ id: number; name: string; runtime_spec_json: Record<string, unknown> }>(
+      `SELECT id, name, runtime_spec_json FROM agents WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
       [experiment.agent_id]
     );
     const agent = agentRow.rows[0];
@@ -268,7 +210,7 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     }
 
     const items = await tx.query<DataItemForRun>(
-      `SELECT id, session_jsonl, user_input, trace_id, reference_trajectory, reference_output
+      `SELECT id, session_jsonl, user_input, reference_output
        FROM data_items
        WHERE dataset_id = $1 AND deleted_at IS NULL
        ORDER BY created_at ASC`,
@@ -278,14 +220,14 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     if (items.rows.length === 0) {
       await tx.query(
         `UPDATE experiments
-         SET queue_status = 'idle',
+         SET queue_status = $2,
              queue_message_id = NULL,
              queued_at = NULL,
              started_at = NULL,
              finished_at = NULL,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $1 AND deleted_at IS NULL`,
-        [experimentId]
+        [experimentId, experiment.queue_status]
       );
       return { kind: "empty", runCaseCount: 0 };
     }
@@ -296,31 +238,51 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
       attempt_no: number;
       session_jsonl: string;
       user_input: string;
-      trace_id: string | null;
-      reference_trajectory: unknown;
       reference_output: unknown;
     }> = [];
+    const newRunCaseIds: number[] = [];
+    const replacedPairs: Array<{ oldRunCaseId: number; newRunCaseId: number }> = [];
+
+    const latestByItem = new Map<number, { run_case_id: number; attempt_no: number }>();
+    if (experiment.queue_status === "manual_terminated") {
+      const latestRows = await tx.query<{ run_case_id: number; data_item_id: number; attempt_no: number }>(
+        `SELECT id AS run_case_id, data_item_id, attempt_no
+         FROM run_cases
+         WHERE experiment_id = $1 AND is_latest = TRUE`,
+        [experiment.id]
+      );
+      for (const row of latestRows.rows) {
+        latestByItem.set(row.data_item_id, row);
+      }
+    }
 
     for (const item of items.rows) {
+      const prevLatest = latestByItem.get(item.id);
+      const nextAttempt = prevLatest ? prevLatest.attempt_no + 1 : 1;
+      if (prevLatest) {
+        await tx.query(`UPDATE run_cases SET is_latest = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [prevLatest.run_case_id]);
+      }
       const runCaseId = await insertAndGetId(
         tx as unknown as Tx,
         `INSERT INTO run_cases (
           experiment_id, data_item_id, agent_id, attempt_no, is_latest, status,
           created_at, updated_at
-        ) VALUES ($1, $2, $3, 1, TRUE, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [experiment.id, item.id, experiment.agent_id]
+        ) VALUES ($1, $2, $3, $4, TRUE, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [experiment.id, item.id, experiment.agent_id, nextAttempt]
       );
       if (!runCaseId) {
         throw new Error(`Failed to create run_case for data_item=${item.id}`);
       }
+      newRunCaseIds.push(runCaseId);
+      if (prevLatest) {
+        replacedPairs.push({ oldRunCaseId: prevLatest.run_case_id, newRunCaseId: runCaseId });
+      }
       runCases.push({
         run_case_id: runCaseId,
         data_item_id: item.id,
-        attempt_no: 1,
+        attempt_no: nextAttempt,
         session_jsonl: item.session_jsonl,
         user_input: item.user_input,
-        trace_id: item.trace_id,
-        reference_trajectory: item.reference_trajectory,
         reference_output: item.reference_output
       });
     }
@@ -328,6 +290,7 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     return {
       kind: "ready",
       runCaseCount: items.rows.length,
+      previousQueueStatus: experiment.queue_status as "idle" | "manual_terminated",
       experiment: {
         id: experiment.id
       },
@@ -340,12 +303,12 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
         name: agent.name,
         agent_key: experiment.agent_key,
         version: experiment.agent_version,
-        docker_image: experiment.docker_image,
-        openapi_spec: agent.openapi_spec,
-        metadata: agent.metadata
+        runtime_spec_json: agent.runtime_spec_json
       },
-      evaluators,
-      runCases
+      scorers,
+      runCases,
+      newRunCaseIds,
+      replacedPairs
     };
   });
 
@@ -359,7 +322,7 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
       experiment_id: dispatch.experiment.id,
       dataset: dispatch.dataset,
       agent: dispatch.agent,
-      evaluators: dispatch.evaluators,
+      scorers: dispatch.scorers,
       run_cases: dispatch.runCases,
       triggered_by: _triggeredBy
     });
@@ -372,18 +335,38 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     );
   } catch (error) {
     await withTransaction(async (tx) => {
-      await tx.query(
-        `UPDATE experiments
-         SET queue_status = 'idle',
-             queue_message_id = NULL,
-             queued_at = NULL,
-             started_at = NULL,
-             finished_at = NULL,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1`,
-        [dispatch.experiment.id]
-      );
-      await tx.query(`DELETE FROM run_cases WHERE experiment_id = $1`, [dispatch.experiment.id]);
+      if (dispatch.previousQueueStatus === "manual_terminated") {
+        for (const runCaseId of dispatch.newRunCaseIds) {
+          await tx.query(`DELETE FROM run_cases WHERE id = $1`, [runCaseId]);
+        }
+        for (const pair of dispatch.replacedPairs) {
+          await tx.query(`UPDATE run_cases SET is_latest = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [pair.oldRunCaseId]);
+        }
+        await tx.query(
+          `UPDATE experiments
+           SET queue_status = 'manual_terminated',
+               queue_message_id = NULL,
+               queued_at = NULL,
+               started_at = NULL,
+               finished_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1`,
+          [dispatch.experiment.id]
+        );
+      } else {
+        await tx.query(
+          `UPDATE experiments
+           SET queue_status = 'idle',
+               queue_message_id = NULL,
+               queued_at = NULL,
+               started_at = NULL,
+               finished_at = NULL,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1`,
+          [dispatch.experiment.id]
+        );
+        await tx.query(`DELETE FROM run_cases WHERE experiment_id = $1`, [dispatch.experiment.id]);
+      }
     });
     throw error;
   }
@@ -392,9 +375,9 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
 }
 
 export async function retryFailedRunCases(experimentId: number, _triggeredBy: string) {
-  return withTransaction(async (tx) => {
+  const dispatch = await withTransaction(async (tx) => {
     const exp = await tx.query<ExperimentContext>(
-      `SELECT e.id, e.dataset_id, e.agent_id, e.queue_status, a.agent_key, a.version AS agent_version, a.docker_image
+      `SELECT e.id, e.dataset_id, e.agent_id, e.queue_status, a.agent_key, a.version AS agent_version, a.runtime_spec_json
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
        JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
@@ -411,10 +394,25 @@ export async function retryFailedRunCases(experimentId: number, _triggeredBy: st
     if (evaluators.length === 0) {
       throw new Error("Experiment has no evaluators");
     }
+    const scorers = evaluators.map((item) => ({
+      id: item.id,
+      scorer_key: item.evaluator_key,
+      name: item.name,
+      scorer_config: {
+        prompt_template: item.prompt_template,
+        base_url: item.base_url,
+        model_name: item.model_name,
+        api_style: item.api_style,
+        api_key: item.api_key
+      }
+    }));
 
     await tx.query(
       `UPDATE experiments
-       SET queue_status = 'consuming',
+       SET queue_status = 'queued',
+           queued_at = CURRENT_TIMESTAMP,
+           queue_message_id = NULL,
+           started_at = NULL,
            finished_at = NULL,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $1`,
@@ -425,40 +423,140 @@ export async function retryFailedRunCases(experimentId: number, _triggeredBy: st
       run_case_id: number;
       data_item_id: number;
       attempt_no: number;
+      session_jsonl: string;
       user_input: string;
-      reference_trajectory: unknown;
       reference_output: unknown;
     }>(
-      `SELECT rc.id AS run_case_id, rc.data_item_id, rc.attempt_no, di.user_input, di.reference_trajectory, di.reference_output
+      `SELECT rc.id AS run_case_id, rc.data_item_id, rc.attempt_no, di.session_jsonl, di.user_input, di.reference_output
        FROM run_cases rc
        JOIN data_items di ON di.id = rc.data_item_id
        WHERE rc.experiment_id = $1
          AND rc.is_latest = TRUE
          AND rc.status = 'failed'
-       ORDER BY rc.created_at ASC`,
+      ORDER BY rc.created_at ASC`,
       [experimentId]
     );
 
-    for (const row of failedLatest.rows) {
-      await tx.query(`UPDATE run_cases SET is_latest = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [row.run_case_id]);
-      await runOneCase(
-        tx as unknown as Tx,
-        experiment,
-        {
-          id: row.data_item_id,
-          user_input: row.user_input,
-          reference_trajectory: row.reference_trajectory,
-          reference_output: row.reference_output
-        },
-        row.attempt_no + 1,
-        evaluators
-      );
+    if (failedLatest.rows.length === 0) {
+      await updateExperimentStatus(tx as unknown as Tx, experimentId);
+      return { kind: "empty" as const, retried: 0 };
     }
 
-    await updateExperimentStatus(tx as unknown as Tx, experimentId);
+    const datasetRow = await tx.query<{ id: number; name: string }>(
+      `SELECT id, name FROM datasets WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+      [experiment.dataset_id]
+    );
+    const dataset = datasetRow.rows[0];
+    if (!dataset) {
+      throw new Error("Dataset not found");
+    }
 
-    return { retried: failedLatest.rows.length };
+    const agentRow = await tx.query<{ id: number; name: string; runtime_spec_json: Record<string, unknown> }>(
+      `SELECT id, name, runtime_spec_json FROM agents WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+      [experiment.agent_id]
+    );
+    const agent = agentRow.rows[0];
+    if (!agent) {
+      throw new Error("Agent not found");
+    }
+
+    const runCases: Array<{
+      run_case_id: number;
+      data_item_id: number;
+      attempt_no: number;
+      session_jsonl: string;
+      user_input: string;
+      reference_output: unknown;
+    }> = [];
+    const replacedPairs: Array<{ oldRunCaseId: number; newRunCaseId: number }> = [];
+
+    for (const row of failedLatest.rows) {
+      await tx.query(`UPDATE run_cases SET is_latest = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [row.run_case_id]);
+      const nextAttempt = row.attempt_no + 1;
+      const newRunCaseId = await insertAndGetId(
+        tx as unknown as Tx,
+        `INSERT INTO run_cases (
+          experiment_id, data_item_id, agent_id, attempt_no, is_latest, status,
+          created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, TRUE, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [experiment.id, row.data_item_id, experiment.agent_id, nextAttempt]
+      );
+      if (!newRunCaseId) {
+        throw new Error(`Failed to create retry run_case for data_item=${row.data_item_id}`);
+      }
+      replacedPairs.push({ oldRunCaseId: row.run_case_id, newRunCaseId });
+      runCases.push({
+        run_case_id: newRunCaseId,
+        data_item_id: row.data_item_id,
+        attempt_no: nextAttempt,
+        session_jsonl: row.session_jsonl,
+        user_input: row.user_input,
+        reference_output: row.reference_output
+      });
+    }
+
+    return {
+      kind: "ready" as const,
+      retried: failedLatest.rows.length,
+      experiment: { id: experiment.id },
+      dataset: {
+        id: dataset.id,
+        name: dataset.name
+      },
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        agent_key: experiment.agent_key,
+        version: experiment.agent_version,
+        runtime_spec_json: agent.runtime_spec_json
+      },
+      scorers,
+      runCases,
+      replacedPairs
+    };
   });
+
+  if (dispatch.kind === "empty") {
+    return { retried: 0, queueMessageId: null };
+  }
+
+  let queueResult: { messageId: string; queueName: string };
+  try {
+    queueResult = await publishExperimentRunRequested({
+      experiment_id: dispatch.experiment.id,
+      dataset: dispatch.dataset,
+      agent: dispatch.agent,
+      scorers: dispatch.scorers,
+      run_cases: dispatch.runCases,
+      triggered_by: _triggeredBy
+    });
+    await dbQuery(
+      `UPDATE experiments
+       SET queue_message_id = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 AND deleted_at IS NULL`,
+      [dispatch.experiment.id, queueResult.messageId]
+    );
+  } catch (error) {
+    await withTransaction(async (tx) => {
+      for (const pair of dispatch.replacedPairs) {
+        await tx.query(`DELETE FROM run_cases WHERE id = $1`, [pair.newRunCaseId]);
+        await tx.query(`UPDATE run_cases SET is_latest = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [pair.oldRunCaseId]);
+      }
+      await tx.query(
+        `UPDATE experiments
+         SET queue_message_id = NULL,
+             queued_at = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [dispatch.experiment.id]
+      );
+      await updateExperimentStatus(tx as unknown as Tx, dispatch.experiment.id);
+    });
+    throw error;
+  }
+
+  return { retried: dispatch.retried, queueMessageId: queueResult.messageId };
 }
 
 export async function refreshExperimentStatus(experimentId: number) {
@@ -480,7 +578,52 @@ export async function markExperimentFailed(experimentId: number, reason: string)
   await dbQuery(
     `UPDATE run_cases
      SET status = 'failed', error_message = $2, updated_at = CURRENT_TIMESTAMP
-     WHERE experiment_id = $1 AND is_latest = TRUE AND status IN ('pending', 'running')`,
+     WHERE experiment_id = $1 AND is_latest = TRUE AND status IN ('pending', 'queued', 'running', 'trajectory', 'scoring')`,
     [experimentId, reason]
   );
+}
+
+export async function terminateExperiment(experimentId: number, terminatedBy: string) {
+  return withTransaction(async (tx) => {
+    const exp = await tx.query<{ queue_status: string; queue_message_id: string | null }>(
+      `SELECT queue_status, queue_message_id
+       FROM experiments
+       WHERE id = $1 AND deleted_at IS NULL
+       LIMIT 1`,
+      [experimentId]
+    );
+    if (exp.rows.length === 0) {
+      throw new Error("Experiment not found");
+    }
+
+    const row = exp.rows[0];
+    if (row.queue_status !== "queued" && row.queue_status !== "consuming" && row.queue_status !== "test_case") {
+      return { terminated: false, queueStatus: row.queue_status };
+    }
+
+    const reason = `manual terminated by ${terminatedBy}${row.queue_message_id ? `; message_id=${row.queue_message_id}` : ""}`;
+    await tx.query(
+      `UPDATE experiments
+       SET queue_status = 'manual_terminated',
+           queue_message_id = NULL,
+           finished_at = CURRENT_TIMESTAMP,
+           updated_by = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 AND deleted_at IS NULL`,
+      [experimentId, terminatedBy]
+    );
+    await tx.query(
+      `UPDATE run_cases
+       SET status = 'canceled',
+           error_message = $2,
+           finished_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE experiment_id = $1
+         AND is_latest = TRUE
+         AND status IN ('pending', 'queued', 'running', 'trajectory', 'scoring')`,
+      [experimentId, reason]
+    );
+
+    return { terminated: true, queueStatus: "manual_terminated" };
+  });
 }

@@ -36,6 +36,9 @@
 - 鼠标 `pointer`
 - 可见状态变化（边框/底色/位移/下划线至少一种）
 - 表单必填字段统一使用红星；optional 字段不做强制标识。
+- 数据表格与详情布局禁止出现横向滚动（no horizontal scroll）：
+- 列宽必须自适应内容与容器，长文本优先换行，不允许跨列重叠覆盖。
+- 任何新增/调整列都必须在桌面与移动端验证无横滑。
 
 ## 5) Entity UX Contract
 - 所有实体默认支持 CRUD（除业务明确禁止）。
@@ -53,7 +56,9 @@
 - 所有 schema 变更必须同时更新：
 - `db/init.mysql.sql`
 - `db/init.postgres.sql`
+- 任意 `lib/**/*.ts` 中涉及数据库字段/类型/契约的改动，必须同批更新上述两份 init SQL。
 - 若已有线上/本地存量库，提供对应 SQL 迁移命令（ALTER/MIGRATION）。
+- 对线上库执行的 ALTER/MIGRATION 必须回写到 init SQL，确保重建库一致。
 - 禁止只改代码不改 init SQL，避免重建数据库后结构不一致。
 
 ## 7) Experiment And Run Semantics
@@ -80,6 +85,7 @@
 - 改动涉及数据库字段时，必须同步更新 TypeScript 类型。
 - 允许破坏性调整，但必须“代码 + schema + 页面行为”同批落地。
 - 禁止引入临时分叉逻辑作为长期方案。
+- 尽量不要使用 any 这种类型。
 
 ## 10) Verification Checklist
 - 页面交互：

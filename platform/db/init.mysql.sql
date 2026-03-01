@@ -17,8 +17,7 @@ CREATE TABLE IF NOT EXISTS data_items (
   session_jsonl LONGTEXT NOT NULL,
   user_input TEXT NOT NULL,
   reference_output JSON NOT NULL,
-  trace_id VARCHAR(255),
-  reference_trajectory JSON,
+  mock_config JSON,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
   is_deleted TINYINT(1) NOT NULL DEFAULT 0,
@@ -35,8 +34,10 @@ CREATE TABLE IF NOT EXISTS evaluators (
   evaluator_key VARCHAR(255) NOT NULL UNIQUE,
   name VARCHAR(255) NOT NULL,
   prompt_template TEXT NOT NULL,
-  base_url VARCHAR(1024) NOT NULL DEFAULT 'https://api.openai.com/v1',
-  model_name VARCHAR(255) NOT NULL DEFAULT 'gpt-4.1-mini',
+  base_url VARCHAR(1024) NOT NULL DEFAULT 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+  model_name VARCHAR(255) NOT NULL DEFAULT 'doubao-1-5-lite-32k-250115',
+  api_style VARCHAR(32) NOT NULL DEFAULT 'openai',
+  api_key VARCHAR(1024) NOT NULL DEFAULT '',
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
   is_deleted TINYINT(1) NOT NULL DEFAULT 0,
@@ -46,22 +47,69 @@ CREATE TABLE IF NOT EXISTS evaluators (
   INDEX idx_evaluators_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS traces (
+
+CREATE TABLE IF NOT EXISTS otel_traces (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   trace_id VARCHAR(255),
   span_id VARCHAR(255),
   parent_span_id VARCHAR(255),
   name VARCHAR(255) NOT NULL,
   service_name VARCHAR(255),
+  status VARCHAR(100),
   attributes JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  resource_attributes JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  scope_attributes JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  scope_name VARCHAR(255),
+  scope_version VARCHAR(255),
   start_time DATETIME,
   end_time DATETIME,
-  status VARCHAR(100),
+  run_case_id BIGINT NULL,
+  experiment_id BIGINT NULL,
   raw JSON NOT NULL,
   is_deleted TINYINT(1) NOT NULL DEFAULT 0,
   deleted_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_traces_is_deleted (is_deleted)
+  INDEX idx_otel_traces_is_deleted (is_deleted),
+  INDEX idx_otel_traces_trace_id (trace_id),
+  INDEX idx_otel_traces_span_id (span_id),
+  INDEX idx_otel_traces_service_name (service_name),
+  INDEX idx_otel_traces_run_case_id (run_case_id),
+  INDEX idx_otel_traces_experiment_id (experiment_id),
+  INDEX idx_otel_traces_start_time (start_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS otel_logs (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  trace_id VARCHAR(255),
+  span_id VARCHAR(255),
+  service_name VARCHAR(255),
+  severity_text VARCHAR(64),
+  severity_number INT,
+  body_text LONGTEXT,
+  body_json JSON NULL,
+  attributes JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  resource_attributes JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  scope_attributes JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  scope_name VARCHAR(255),
+  scope_version VARCHAR(255),
+  flags INT,
+  dropped_attributes_count INT,
+  event_time DATETIME,
+  observed_time DATETIME,
+  run_case_id BIGINT NULL,
+  experiment_id BIGINT NULL,
+  raw JSON NOT NULL,
+  is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_otel_logs_is_deleted (is_deleted),
+  INDEX idx_otel_logs_trace_id (trace_id),
+  INDEX idx_otel_logs_span_id (span_id),
+  INDEX idx_otel_logs_service_name (service_name),
+  INDEX idx_otel_logs_severity_text (severity_text),
+  INDEX idx_otel_logs_run_case_id (run_case_id),
+  INDEX idx_otel_logs_experiment_id (experiment_id),
+  INDEX idx_otel_logs_event_time (event_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -72,8 +120,8 @@ CREATE TABLE IF NOT EXISTS agents (
   description TEXT NOT NULL,
   docker_image VARCHAR(1024) NOT NULL,
   openapi_spec JSON NOT NULL,
-  status VARCHAR(100) NOT NULL DEFAULT 'active',
   metadata JSON NOT NULL,
+  runtime_spec_json JSON NOT NULL,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
   is_deleted TINYINT(1) NOT NULL DEFAULT 0,
@@ -82,7 +130,6 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT uq_agents_key_version UNIQUE (agent_key, version),
   INDEX idx_agents_key (agent_key),
-  INDEX idx_agents_status (status),
   INDEX idx_agents_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -110,71 +157,6 @@ CREATE TABLE IF NOT EXISTS experiments (
   INDEX idx_experiments_queue_status (queue_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-SET @exp_has_queue_message_id := (
-  SELECT COUNT(*)
-  FROM information_schema.columns
-  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'queue_message_id'
-);
-SET @exp_sql := IF(@exp_has_queue_message_id = 0, 'ALTER TABLE experiments ADD COLUMN queue_message_id VARCHAR(128) NULL AFTER agent_id', 'SELECT 1');
-PREPARE exp_stmt FROM @exp_sql;
-EXECUTE exp_stmt;
-DEALLOCATE PREPARE exp_stmt;
-
-SET @exp_has_queued_at := (
-  SELECT COUNT(*)
-  FROM information_schema.columns
-  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'queued_at'
-);
-SET @exp_sql := IF(@exp_has_queued_at = 0, 'ALTER TABLE experiments ADD COLUMN queued_at TIMESTAMP NULL DEFAULT NULL AFTER queue_message_id', 'SELECT 1');
-PREPARE exp_stmt FROM @exp_sql;
-EXECUTE exp_stmt;
-DEALLOCATE PREPARE exp_stmt;
-
-SET @exp_has_queue_status := (
-  SELECT COUNT(*)
-  FROM information_schema.columns
-  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'queue_status'
-);
-SET @exp_sql := IF(@exp_has_queue_status = 0, 'ALTER TABLE experiments ADD COLUMN queue_status VARCHAR(64) NOT NULL DEFAULT ''idle'' AFTER queued_at', 'SELECT 1');
-PREPARE exp_stmt FROM @exp_sql;
-EXECUTE exp_stmt;
-DEALLOCATE PREPARE exp_stmt;
-
-SET @exp_has_status := (
-  SELECT COUNT(*)
-  FROM information_schema.columns
-  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'status'
-);
-SET @exp_sql := IF(
-  @exp_has_status = 1,
-  'UPDATE experiments
-   SET queue_status = CASE
-     WHEN status = ''queued'' THEN ''queued''
-     WHEN status = ''running'' THEN ''consuming''
-     WHEN status IN (''finished'', ''partial_failed'') THEN ''done''
-     WHEN status = ''failed'' THEN ''failed''
-     ELSE ''idle''
-   END',
-  'SELECT 1'
-);
-PREPARE exp_stmt FROM @exp_sql;
-EXECUTE exp_stmt;
-DEALLOCATE PREPARE exp_stmt;
-
-SET @exp_sql := IF(@exp_has_status = 1, 'ALTER TABLE experiments DROP COLUMN status', 'SELECT 1');
-PREPARE exp_stmt FROM @exp_sql;
-EXECUTE exp_stmt;
-DEALLOCATE PREPARE exp_stmt;
-
-SET @exp_has_run_locked := (
-  SELECT COUNT(*)
-  FROM information_schema.columns
-  WHERE table_schema = DATABASE() AND table_name = 'experiments' AND column_name = 'run_locked'
-);
-SET @exp_sql := IF(@exp_has_run_locked = 1, 'ALTER TABLE experiments DROP COLUMN run_locked', 'SELECT 1');
-PREPARE exp_stmt FROM @exp_sql;
-EXECUTE exp_stmt;
-DEALLOCATE PREPARE exp_stmt;
 
 CREATE TABLE IF NOT EXISTS experiment_evaluators (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -206,6 +188,11 @@ CREATE TABLE IF NOT EXISTS run_cases (
   output_tokens BIGINT DEFAULT NULL,
   error_message TEXT DEFAULT NULL,
   logs LONGTEXT DEFAULT NULL,
+  runtime_snapshot_json JSON DEFAULT NULL,
+  inspect_eval_id VARCHAR(255) DEFAULT NULL,
+  inspect_sample_id VARCHAR(255) DEFAULT NULL,
+  usage_json JSON DEFAULT NULL,
+  artifacts_json JSON DEFAULT NULL,
   started_at TIMESTAMP NULL DEFAULT NULL,
   finished_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -219,6 +206,20 @@ CREATE TABLE IF NOT EXISTS run_cases (
   CONSTRAINT uq_run_case_attempt UNIQUE (experiment_id, data_item_id, attempt_no),
   INDEX idx_run_cases_experiment_latest_status (experiment_id, is_latest, status),
   INDEX idx_run_cases_experiment_created (experiment_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS run_case_scores (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  run_case_id BIGINT UNSIGNED NOT NULL,
+  scorer_key VARCHAR(255) NOT NULL,
+  score DOUBLE NOT NULL,
+  reason TEXT NOT NULL,
+  raw_result_json JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_run_case_scores_run_case
+    FOREIGN KEY (run_case_id) REFERENCES run_cases(id) ON DELETE CASCADE,
+  INDEX idx_run_case_scores_run_case (run_case_id),
+  INDEX idx_run_case_scores_scorer (scorer_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS evaluate_results (
@@ -239,38 +240,64 @@ CREATE TABLE IF NOT EXISTS evaluate_results (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Seed evaluators
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('task_success', '任务成功', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('task_success', '任务成功', '你是一名专业的任务评估员。你的任务是：基于用户的任务目标、Agent的执行轨迹和最终输出，判断任务是否成功完成。
 
         <评判标准>
-        请忽略工具参数的具体设置，合适的工具应满足：
-        1. 工具的功能和问题需求相符，调用该工具应能有效且完全解决问题，就是 1 分。
-        2. 工具在当前可调用工具列表中，不是虚构或无效的工具，否则0分。
-        3. 调用的工具中有不符合用户意图的，整体工具选择即被视为错误(0分)。
-        4.	允许“等价工具”替代（例如点击“搜索”按钮 vs 按 Enter 提交），但需合理，比如：
-          	- 提交搜索：hotkey(enter) ⇆ 点击页面“Search/提交”按钮。
-	          - 打开应用/文件：left_double_click ⇆ click（在可见“打开”按钮后再 click）。
-	          - 滚动页面：scroll ⇆ hotkey(PageDown/Space)（如上下文明确可行）。
-	          - 上下文菜单操作：right_click + 菜单项点击 ⇆ 直接点击显式的“下载/打开”按钮（两者择一即可）。
-            注：若使用了功能等价但效率更低的工具导致动作执行次数不必要的增多(比如轨迹中出现超过3次低效选择工具)，则给0.5分。
+        评分采用三档制（1.0 / 0.5 / 0.0）：
+
+        1.0分（任务成功）：
+        - Agent完全理解了用户的意图和任务目标
+        - 任务目标已经完全实现，达到了用户的预期
+        - 最终输出符合用户需求，质量满足要求
+        - 如果任务涉及查找信息，找到的信息准确且完整
+        - 如果任务涉及操作执行，操作已经正确完成
+
+        0.5分（部分成功）：
+        - Agent基本理解了用户的意图
+        - 任务目标大部分完成，但存在轻微不足或遗漏
+        - 最终输出基本符合需求，但可能有细节问题
+        - 完成度达到可用程度，但未完全达到理想状态
+
+        0.0分（任务失败）：
+        - Agent未能理解用户的真实意图
+        - 任务目标未完成或严重偏离预期
+        - 最终输出不符合用户需求或存在重大错误
+        - 执行过程中出现致命错误导致任务无法完成
+        - Agent陷入循环或死锁状态无法继续
+
+        特殊情况：
+        - 如果任务客观上无法完成（如信息不存在、权限不足等），但Agent能正确识别并合理求助用户，视为任务成功（1.0分）
+        - 如果Agent最后调用了call_user寻求帮助，需要判断是否合理：合理的求助（如缺少必要信息）视为成功，不合理的求助（如遇到轻微困难就放弃）视为失败
         </评判标准>
 
         <输入>
         [轨迹]：
 ```json
-{{trajectory}}
+{{run.trajectory}}
 ```
         [Agent输出]
 ```json
-{{agent_output}}
+{{run.output}}
 ```
-        [可调用工具列表]：
-```json
-{{tools}}
+        [用户任务]：
+```
+{{data_item.input}}
 ```
         </输入>
         
         <思考指导>
-        首先，请通过查看输入的上下文理解用户的真实意图。如果输入中没有明确表达意图，请尝试从上下文或消息内容中合理推断。一旦你理解了目标，请严格根据评判标准分析助手的工具选择是否合适。
+        评估步骤：
+        1. 首先从输入中理解用户的任务目标是什么
+        2. 分析Agent的执行轨迹，看其是否正确理解了任务
+        3. 查看最终输出，判断是否完成了用户的目标
+        4. 综合考虑完成质量、效率和准确性
+        5. 根据评判标准给出最终评分（1.0/0.5/0.0）
+
+        注意事项：
+        - 重点关注任务目标的完成度，而非执行过程的效率
+        - 如果用户目标模糊，以合理推断的意图为准
+        - 考虑实际可操作性，不要求Agent完成客观上不可能的任务
+        - 对于复杂任务，允许分步骤逐一完成
         另外，注意一些细节：
           - 忽略参数但不忽略工具类型与时机（例如在地址栏输入 URL 应使用 type，提交可 hotkey(enter) 或点击“Search”）。
 	        - 冗余（重复 type/enter/wait）不影响正确/错误
@@ -278,10 +305,10 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
 	        - 受阻求助：页面无响应或权限限制时，call_user 合理；若无阻碍却滥用 → 记为问题。
 	        - 若实际去调用 login → 捏造工具（硬失败）；
 	        - 若出现真实登录表单但未调用 login、改用 type 输入账号密码 → 策略红线（硬失败）。
-	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://api.openai.com/v1', 'gpt-4.1-mini', 'system', 'system')
-ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions', 'doubao-1-5-lite-32k-250115', 'openai', '', 'system', 'system')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), api_style = VALUES(api_style), updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('trajectory_quality', '轨迹质量', '你是一名专业的数据标注员/审稿员，专门评估计算机使用类（CUA）Agent的交互轨迹是否逻辑正确、推进清晰、目标达成。你将收到一段包含系统指令、用户目标、Agent 的思考（thought，可选）、动作（function calls）与若干屏幕截图的轨迹。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('trajectory_quality', '轨迹质量', '你是一名专业的数据标注员/审稿员，专门评估计算机使用类（CUA）Agent的交互轨迹是否逻辑正确、推进清晰、目标达成。你将收到一段包含系统指令、用户目标、Agent 的思考（thought，可选）、动作（function calls）与若干屏幕截图的轨迹。
         
         <评分标准>
         请先给出六个子分（0~1），再折算到总分，并映射到三档标注（1.0 / 0.5 / 0.0）。
@@ -320,11 +347,11 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
         <输入>
         [轨迹]：
 ```json
-{{trajectory}}
+{{run.trajectory}}
 ```
         [Agent输出]
 ```json
-{{agent_output}}
+{{run.output}}
 ```
         [可调用工具列表]：
 ```json
@@ -338,10 +365,10 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
 	        2. 动作：主要体现为函数调用（如：click/left_double_click/type/wait/login 等）。
 	        3. 截图：role为user的输入里，以 image_url 形式出现，代表每次CU(Computor Use)动作执行后的环境状态（若动作后无截图，使用最接近的下一张作为“结果”）。
         首先，请通过查看输入内容，来理解该轨迹的目标、路径和结果。一旦你理解了目标，请一步步思考，根据该轨迹实现该目标的程度进行评分。
-        </思考指导>', 'https://api.openai.com/v1', 'gpt-4.1-mini', 'system', 'system')
-ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+        </思考指导>', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions', 'doubao-1-5-lite-32k-250115', 'openai', '', 'system', 'system')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), api_style = VALUES(api_style), updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('tool_selection_quality', '工具选择质量', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('tool_selection_quality', '工具选择质量', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
 
         <评判标准>
         请忽略工具参数的具体设置，合适的工具应满足：
@@ -359,11 +386,11 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
         <输入>
         [轨迹]：
 ```json
-{{trajectory}}
+{{run.trajectory}}
 ```
         [Agent输出]
 ```json
-{{agent_output}}
+{{run.output}}
 ```
         [可调用工具列表]：
 ```json
@@ -379,10 +406,10 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
 	        - 受阻求助：页面无响应或权限限制时，call_user 合理；若无阻碍却滥用 → 记为问题。
 	        - 若实际去调用 login → 捏造工具（硬失败）；
 	        - 若出现真实登录表单但未调用 login、改用 type 输入账号密码 → 策略红线（硬失败）。
-	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://api.openai.com/v1', 'gpt-4.1-mini', 'system', 'system')
-ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+	        - 功能错配示例：需要搜索却用 drag、需要文本输入却只 click、需要滚动却反复 wait。', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions', 'doubao-1-5-lite-32k-250115', 'openai', '', 'system', 'system')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), api_style = VALUES(api_style), updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, created_by, updated_by) VALUES ('tool_params', '工具参数', '请将AI 助手生成的工具调用中提取的参数与下方提供的 JSON 进行比较，一步步思考，以判断生成的调用是否从问题中提取了完全正确的参数。 [工具定义列表]中给出了当前调用工具的信息，包括工具作用、所需参数等信息。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('tool_params', '工具参数', '请将AI 助手生成的工具调用中提取的参数与下方提供的 JSON 进行比较，一步步思考，以判断生成的调用是否从问题中提取了完全正确的参数。 [工具定义列表]中给出了当前调用工具的信息，包括工具作用、所需参数等信息。
 
         <评判标准>
         只有当工具调用中的所有参数均与输入中提供的[工具定义列表]中完全一致，且只提供了相关的信息，才视为“正确”。例如：
@@ -400,11 +427,11 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
         <输入>
         [轨迹]：
 ```json
-{{trajectory}}
+{{run.trajectory}}
 ```
         [Agent输出]
 ```json
-{{agent_output}}
+{{run.output}}
 ```
         [可调用工具列表]：
 ```json
@@ -416,5 +443,5 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
         首先，请通过查看输入的上下文理解用户的真实意图。如果输入中没有明确表达意图，请尝试从上下文或消息内容中合理推断。一旦你理解了目标，再将每个参数结合意图，一步步分析是否填写正确。
         对于参数值，一个一个列出来，然后检查参数值是不是在上下文中真的有提到，且符合意图。根据Prompt 中的评判标准一步步思考、分析，满足评判标准就是 1 分，否则就是 0 分。
         评估的对象也包含[历史轨迹中的工具调用]
-        </思考指导>', 'https://api.openai.com/v1', 'gpt-4.1-mini', 'system', 'system')
-ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), updated_at = CURRENT_TIMESTAMP;
+        </思考指导>', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions', 'doubao-1-5-lite-32k-250115', 'openai', '', 'system', 'system')
+ON DUPLICATE KEY UPDATE name = VALUES(name), prompt_template = VALUES(prompt_template), base_url = VALUES(base_url), model_name = VALUES(model_name), api_style = VALUES(api_style), updated_at = CURRENT_TIMESTAMP;

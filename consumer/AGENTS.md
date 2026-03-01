@@ -9,4 +9,13 @@
 ## Rules
 - 与 `platform` 共享消息契约版本。
 - 引入 breaking schema 时必须同步更新 `platform/db` 初始化 SQL。
+- 涉及 `platform/lib/*.ts` 的 schema/契约改动，必须同批更新 `platform/db/init.mysql.sql` 与 `platform/db/init.postgres.sql`。
+- 对已存在数据库执行 ALTER/MIGRATION 后，必须把同等变更回写到 init SQL，禁止只改线上不改仓库。
 - 所有外部副作用操作（docker/rabbitmq/db）必须可观测（日志 + error code + retry）。
+- 在 `consumer/` 目录执行 Python 命令时，统一使用本项目 `.venv`（如 `.venv/bin/python`），禁止依赖系统 Python 环境。
+- 涉及较大改动（架构调整、核心执行链路、消息处理主流程、运行时配置行为变化）时，提交前必须执行并通过验收脚本：`./scripts/e2e_experiments.sh`。
+- 默认禁止新增非必要配置项（env/runtime flag/表单字段）。若必须新增，需先确认该配置是刚需且不可由现有机制覆盖。
+- 所有运行时环境变量读取必须集中在 `src/infrastructure/config.py`（或同级单一配置层），业务逻辑层禁止直接 `os.getenv`。
+- 尽量不要使用 any 这种类型。
+- 写代码时按“强类型语言”标准要求自己：类型声明应完整、精确且前后一致，避免宽泛联合类型和隐式类型漂移。
+- 禁止在核心执行链路中加入“兜底逻辑”（fallback）。链路输入来源、执行路径、失败条件必须明确且单一；前置条件不满足时应直接报错，不得静默降级到其他数据源或替代路径。

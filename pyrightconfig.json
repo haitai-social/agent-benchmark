@@ -1,0 +1,12 @@
+{
+  "include": ["consumer/**/*.py"],
+  "exclude": ["**/.venv", "**/__pycache__", "**/.pytest_cache"],
+  "venvPath": "consumer",
+  "venv": ".venv",
+  "executionEnvironments": [
+    {
+      "root": "consumer",
+      "extraPaths": ["consumer/src"]
+    }
+  ]
+}

@@ -1,6 +1,11 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery, engine, withTransaction } from "@/lib/db";
+import { formatDateTime } from "@/lib/datetime";
+import { PaginationControls } from "@/app/components/pagination-controls";
+import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
+import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
+import { parseSelectedIds } from "@/lib/form-ids";
 import { requireUser } from "@/lib/supabase-auth";
 import Link from "next/link";
 import { FilterIcon, FlaskIcon, OpenInNewIcon, PlusIcon, SearchIcon } from "../components/icons";
@@ -8,13 +13,41 @@ import { SubmitButton } from "../components/submit-button";
 import { EntityDrawer } from "../components/entity-drawer";
 import { FormField } from "../components/form-field";
 
-function buildListHref(q: string, status: string, datasetLike: string, agentLike: string) {
+function buildListHref(q: string, status: string, datasetLike: string, agentLike: string, page: number, pageSize: number) {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (status !== "all") params.set("status", status);
   if (datasetLike) params.set("datasetLike", datasetLike);
   if (agentLike) params.set("agentLike", agentLike);
+  if (page > 1) params.set("page", String(page));
+  if (pageSize !== 10) params.set("pageSize", String(pageSize));
   return params.size > 0 ? `/experiments?${params.toString()}` : "/experiments";
+}
+
+function formatDuration(startedAt: string | null, finishedAt: string | null) {
+  if (!startedAt || !finishedAt) return "-";
+  const start = new Date(startedAt).getTime();
+  const end = new Date(finishedAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return "-";
+  const seconds = Math.floor((end - start) / 1000);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function formatLatencyMs(value: number | string | null) {
+  if (value == null) return "-";
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms < 0) return "-";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}m ${s}s`;
 }
 
 function parseEvaluatorIds(formData: FormData) {
@@ -57,6 +90,8 @@ async function createExperiment(formData: FormData) {
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const datasetLike = String(formData.get("datasetLike") ?? "").trim();
   const agentLike = String(formData.get("agentLike") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   if (!name || !datasetIdRaw || !agentIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(agentId) || agentId <= 0 || evaluatorIds.length === 0) {
     return;
@@ -99,7 +134,7 @@ async function createExperiment(formData: FormData) {
   });
 
   revalidatePath("/experiments");
-  redirect(buildListHref(q, status, datasetLike, agentLike));
+  redirect(buildListHref(q, status, datasetLike, agentLike, page, pageSize));
 }
 
 async function updateExperiment(formData: FormData) {
@@ -119,6 +154,8 @@ async function updateExperiment(formData: FormData) {
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const datasetLike = String(formData.get("datasetLike") ?? "").trim();
   const agentLike = String(formData.get("agentLike") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
   if (!idRaw || !name || !datasetIdRaw || !agentIdRaw || !Number.isInteger(id) || id <= 0 || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(agentId) || agentId <= 0 || evaluatorIds.length === 0) {
     return;
@@ -155,7 +192,7 @@ async function updateExperiment(formData: FormData) {
 
   revalidatePath("/experiments");
   revalidatePath(`/experiments/${id}`);
-  redirect(buildListHref(q, status, datasetLike, agentLike));
+  redirect(buildListHref(q, status, datasetLike, agentLike, page, pageSize));
 }
 
 async function deleteExperiment(formData: FormData) {
@@ -168,7 +205,15 @@ async function deleteExperiment(formData: FormData) {
   const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const datasetLike = String(formData.get("datasetLike") ?? "").trim();
   const agentLike = String(formData.get("agentLike") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
   if (!idRaw || !Number.isInteger(id) || id <= 0) return;
+  await softDeleteExperimentById(id, user.id);
+  revalidatePath("/experiments");
+  redirect(buildListHref(q, status, datasetLike, agentLike, page, pageSize));
+}
+
+async function softDeleteExperimentById(id: number, userId: string) {
   await dbQuery(
     `UPDATE experiments
      SET is_deleted = TRUE,
@@ -176,41 +221,97 @@ async function deleteExperiment(formData: FormData) {
          updated_by = $2,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND deleted_at IS NULL`,
-    [id, user.id]
+    [id, userId]
   );
+}
+
+async function bulkDeleteExperiment(formData: FormData) {
+  "use server";
+  const user = await requireUser();
+
+  const ids = parseSelectedIds(formData);
+  const q = String(formData.get("q") ?? "").trim();
+  const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
+  const datasetLike = String(formData.get("datasetLike") ?? "").trim();
+  const agentLike = String(formData.get("agentLike") ?? "").trim();
+  const page = parsePage(String(formData.get("page") ?? "1"));
+  const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
+  if (ids.length <= 0) return;
+
+  for (const id of ids) {
+    await softDeleteExperimentById(id, user.id);
+  }
   revalidatePath("/experiments");
-  redirect(buildListHref(q, status, datasetLike, agentLike));
+  redirect(buildListHref(q, status, datasetLike, agentLike, page, pageSize));
 }
 
 export default async function ExperimentsPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; status?: string; datasetLike?: string; agentLike?: string; panel?: string; id?: string }>;
+  searchParams: Promise<{ q?: string; status?: string; datasetLike?: string; agentLike?: string; panel?: string; id?: string; page?: string; pageSize?: string }>;
 }) {
   await requireUser();
 
-  const { q = "", status = "all", datasetLike = "", agentLike = "", panel = "none", id = "" } = await searchParams;
+  const { q = "", status = "all", datasetLike = "", agentLike = "", panel = "none", id = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
   const filters = {
     q: q.trim(),
     status: status.trim() || "all",
     datasetLike: datasetLike.trim(),
     agentLike: agentLike.trim()
   };
+  const pageSize = parsePageSize(pageSizeRaw);
+  const requestedPage = parsePage(pageRaw);
   const editingId = Number(id.trim());
   const creating = panel === "create";
   const filtering = panel === "filter";
 
-  const listHref = buildListHref(filters.q, filters.status, filters.datasetLike, filters.agentLike);
+  const filterParams = [
+    filters.q,
+    filters.q,
+    filters.q,
+    filters.q,
+    filters.status,
+    filters.status,
+    filters.datasetLike,
+    filters.datasetLike,
+    filters.agentLike,
+    filters.agentLike
+  ];
+  const countResult = await dbQuery<{ total_count: number | string }>(
+    `SELECT COUNT(*) AS total_count
+     FROM experiments e
+     JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
+     JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
+     WHERE ($1 = '' OR LOWER(e.name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(a.version) LIKE CONCAT('%', LOWER($4), '%'))
+       AND e.deleted_at IS NULL
+       AND ($5 = 'all' OR e.queue_status = $6)
+       AND ($7 = '' OR LOWER(d.name) LIKE CONCAT('%', LOWER($8), '%'))
+       AND ($9 = '' OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($10), '%'))`,
+    filterParams
+  );
+  const total = Number(countResult.rows[0]?.total_count ?? 0);
+  const page = clampPage(requestedPage, total, pageSize);
+  const offset = getOffset(page, pageSize);
+
+  const listHref = buildListHref(filters.q, filters.status, filters.datasetLike, filters.agentLike, page, pageSize);
   const createHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=create`;
   const filterHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=filter`;
   const hasFilter = filters.status !== "all" || !!filters.datasetLike || !!filters.agentLike;
+  const paginationQuery = {
+    q: filters.q,
+    status: filters.status === "all" ? "" : filters.status,
+    datasetLike: filters.datasetLike,
+    agentLike: filters.agentLike
+  };
+  const resetHref = buildListHref(filters.q, "all", "", "", 1, pageSize);
+  const bulkDeleteFormId = "experiment-bulk-delete-form";
 
   const [datasets, agents, evaluators, experiments, editing, editingEvaluators] = await Promise.all([
     dbQuery<{ id: number; name: string }>(`SELECT id, name FROM datasets WHERE deleted_at IS NULL ORDER BY created_at DESC`),
     dbQuery<{ id: number; name: string; agent_key: string; version: string }>(
       `SELECT id, name, agent_key, version
        FROM agents
-       WHERE deleted_at IS NULL AND status = 'active'
+       WHERE deleted_at IS NULL
        ORDER BY updated_at DESC`
     ),
     dbQuery<{ id: number; name: string; evaluator_key: string }>(
@@ -229,36 +330,36 @@ export default async function ExperimentsPage({
       agent_version: string;
       queue_status: string;
       queue_message_id: string | null;
+      started_at: string | null;
+      finished_at: string | null;
       created_at: string;
       evaluator_count: number | string;
+      case_total: number | string;
+      case_done: number | string;
+      case_failed: number | string;
+      avg_latency_ms: number | string | null;
     }>(
       `SELECT e.id, e.name, d.id AS dataset_id, d.name AS dataset_name,
               a.id AS agent_id, a.agent_key, a.version AS agent_version,
-              e.queue_status, e.queue_message_id, e.created_at,
-              COUNT(ee.id) AS evaluator_count
+              e.queue_status, e.queue_message_id, e.started_at, e.finished_at, e.created_at,
+              (SELECT COUNT(*) FROM experiment_evaluators ee WHERE ee.experiment_id = e.id) AS evaluator_count,
+              (SELECT COUNT(*) FROM run_cases rc WHERE rc.experiment_id = e.id AND rc.is_latest = TRUE) AS case_total,
+              (SELECT COALESCE(SUM(CASE WHEN rc.status IN ('success','failed','timeout') THEN 1 ELSE 0 END), 0)
+                 FROM run_cases rc WHERE rc.experiment_id = e.id AND rc.is_latest = TRUE) AS case_done,
+              (SELECT COALESCE(SUM(CASE WHEN rc.status IN ('failed','timeout') THEN 1 ELSE 0 END), 0)
+                 FROM run_cases rc WHERE rc.experiment_id = e.id AND rc.is_latest = TRUE) AS case_failed,
+              (SELECT ROUND(AVG(rc.latency_ms), 0) FROM run_cases rc WHERE rc.experiment_id = e.id AND rc.is_latest = TRUE AND rc.latency_ms IS NOT NULL) AS avg_latency_ms
        FROM experiments e
        JOIN datasets d ON d.id = e.dataset_id AND d.deleted_at IS NULL
        JOIN agents a ON a.id = e.agent_id AND a.deleted_at IS NULL
-       LEFT JOIN experiment_evaluators ee ON ee.experiment_id = e.id
        WHERE ($1 = '' OR LOWER(e.name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(a.version) LIKE CONCAT('%', LOWER($4), '%'))
          AND e.deleted_at IS NULL
          AND ($5 = 'all' OR e.queue_status = $6)
          AND ($7 = '' OR LOWER(d.name) LIKE CONCAT('%', LOWER($8), '%'))
          AND ($9 = '' OR LOWER(a.agent_key) LIKE CONCAT('%', LOWER($10), '%'))
-       GROUP BY e.id, e.name, d.id, d.name, a.id, a.agent_key, a.version, e.queue_status, e.queue_message_id, e.created_at
-       ORDER BY e.created_at DESC`,
-      [
-        filters.q,
-        filters.q,
-        filters.q,
-        filters.q,
-        filters.status,
-        filters.status,
-        filters.datasetLike,
-        filters.datasetLike,
-        filters.agentLike,
-        filters.agentLike
-      ]
+       ORDER BY e.created_at DESC
+       LIMIT $11 OFFSET $12`,
+      [...filterParams, pageSize, offset]
     ),
     Number.isInteger(editingId) && editingId > 0
       ? dbQuery<{ id: number; name: string; dataset_id: number; agent_id: number; queue_status: string }>(
@@ -287,6 +388,7 @@ export default async function ExperimentsPage({
           <input type="hidden" name="status" value={filters.status} />
           <input type="hidden" name="datasetLike" value={filters.datasetLike} />
           <input type="hidden" name="agentLike" value={filters.agentLike} />
+          <input type="hidden" name="pageSize" value={pageSize} />
           <label className="input-icon-wrap">
             <SearchIcon width={16} height={16} />
             <input name="q" defaultValue={filters.q} placeholder="搜索实验名称或 Agent" />
@@ -300,6 +402,8 @@ export default async function ExperimentsPage({
           <Link href={filterHref} className="ghost-btn">
             <FilterIcon width={16} height={16} /> 筛选
           </Link>
+          <BulkSelectionControls formId={bulkDeleteFormId} variant="compact" confirmText="确认批量删除已选 {count} 条 Experiment 吗？" />
+          <PaginationControls basePath="/experiments" query={paginationQuery} total={total} page={page} pageSize={pageSize} position="top" variant="compact" />
         </div>
       </section>
 
@@ -309,7 +413,7 @@ export default async function ExperimentsPage({
           {filters.status !== "all" ? <span className="filter-pill">{`MQ状态: ${filters.status}`}</span> : null}
           {filters.datasetLike ? <span className="filter-pill">{`Dataset: ${filters.datasetLike}`}</span> : null}
           {filters.agentLike ? <span className="filter-pill">{`Agent: ${filters.agentLike}`}</span> : null}
-          <Link href={filters.q ? `/experiments?q=${encodeURIComponent(filters.q)}` : "/experiments"} className="text-btn">
+          <Link href={resetHref} className="text-btn">
             清空筛选
           </Link>
         </section>
@@ -325,14 +429,27 @@ export default async function ExperimentsPage({
             <PlusIcon width={16} height={16} /> 新建 Experiment
           </Link>
         </div>
+        <form id={bulkDeleteFormId} action={bulkDeleteExperiment}>
+          <input type="hidden" name="q" value={filters.q} />
+          <input type="hidden" name="statusFilter" value={filters.status} />
+          <input type="hidden" name="datasetLike" value={filters.datasetLike} />
+          <input type="hidden" name="agentLike" value={filters.agentLike} />
+          <input type="hidden" name="page" value={page} />
+          <input type="hidden" name="pageSize" value={pageSize} />
+        </form>
         <table>
           <thead>
             <tr>
+              <th className="bulk-select-cell">选</th>
+              <th>ID</th>
               <th>名称</th>
               <th>评测集</th>
               <th>Agent</th>
               <th>Evaluators</th>
               <th>MQ状态</th>
+              <th>进度</th>
+              <th>平均耗时</th>
+              <th>实验时长</th>
               <th>创建时间</th>
               <th>操作</th>
             </tr>
@@ -340,6 +457,12 @@ export default async function ExperimentsPage({
           <tbody>
             {experiments.rows.map((e) => (
               <tr key={e.id}>
+                <td className="bulk-select-cell">
+                  <input type="checkbox" name="selectedIds" value={e.id} form={bulkDeleteFormId} aria-label={`选择 Experiment ${e.id}`} />
+                </td>
+                <td>
+                  <code>#{e.id}</code>
+                </td>
                 <td>
                   <Link href={`/experiments/${e.id}`} className="link-strong">
                     {e.name}
@@ -353,11 +476,17 @@ export default async function ExperimentsPage({
                 <td>
                   <span className={`status-pill ${e.queue_status}`}>{e.queue_status}</span>
                 </td>
-                <td>{new Date(e.created_at).toLocaleString()}</td>
+                <td>{`${Number(e.case_done)}/${Number(e.case_total)} (fail:${Number(e.case_failed)})`}</td>
+                <td>{formatLatencyMs(e.avg_latency_ms)}</td>
+                <td>{formatDuration(e.started_at, e.finished_at)}</td>
+                <td>{formatDateTime(e.created_at)}</td>
                 <td>
                   <div className="row-actions">
-                    <Link href={`${listHref}${listHref.includes("?") ? "&" : "?"}id=${e.id}`} className="text-btn">
+                    <Link href={`/experiments/${e.id}`} className="text-btn">
                       详情
+                    </Link>
+                    <Link href={`${listHref}${listHref.includes("?") ? "&" : "?"}id=${e.id}`} className="text-btn">
+                      更新
                     </Link>
                     <form action={deleteExperiment}>
                       <input type="hidden" name="id" value={e.id} />
@@ -365,6 +494,8 @@ export default async function ExperimentsPage({
                       <input type="hidden" name="statusFilter" value={filters.status} />
                       <input type="hidden" name="datasetLike" value={filters.datasetLike} />
                       <input type="hidden" name="agentLike" value={filters.agentLike} />
+                      <input type="hidden" name="page" value={page} />
+                      <input type="hidden" name="pageSize" value={pageSize} />
                       <SubmitButton className="text-btn danger" pendingText="删除中...">
                         删除
                       </SubmitButton>
@@ -375,6 +506,8 @@ export default async function ExperimentsPage({
             ))}
           </tbody>
         </table>
+        <BulkSelectionControls formId={bulkDeleteFormId} variant="full" confirmText="确认批量删除已选 {count} 条 Experiment 吗？" />
+        <PaginationControls basePath="/experiments" query={paginationQuery} total={total} page={page} pageSize={pageSize} position="bottom" />
       </section>
 
       {filtering ? (
@@ -391,6 +524,7 @@ export default async function ExperimentsPage({
               <form action="/experiments" className="menu-form">
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="panel" value="none" />
+                <input type="hidden" name="pageSize" value={pageSize} />
                 <label className="field-label">MQ状态</label>
                 <div className="chip-row">
                   {[
@@ -398,7 +532,9 @@ export default async function ExperimentsPage({
                     { value: "queued", label: "queued" },
                     { value: "consuming", label: "consuming" },
                     { value: "done", label: "done" },
-                    { value: "failed", label: "failed" }
+                    { value: "failed", label: "failed" },
+                    { value: "manual_terminated", label: "manual_terminated" },
+                    { value: "test_case", label: "test_case" }
                   ].map((item) => (
                     <label key={item.value} className="chip">
                       <input type="radio" name="status" value={item.value} defaultChecked={filters.status === item.value} />
@@ -411,7 +547,7 @@ export default async function ExperimentsPage({
                 <label className="field-label">Agent Key 包含</label>
                 <input name="agentLike" placeholder="例如 openclaw" defaultValue={filters.agentLike} />
                 <SubmitButton pendingText="应用中...">应用筛选</SubmitButton>
-                <Link href={filters.q ? `/experiments?q=${encodeURIComponent(filters.q)}` : "/experiments"} className="ghost-btn">
+                <Link href={resetHref} className="ghost-btn">
                   重置筛选
                 </Link>
               </form>
@@ -442,6 +578,8 @@ export default async function ExperimentsPage({
             <input type="hidden" name="statusFilter" value={filters.status} />
             <input type="hidden" name="datasetLike" value={filters.datasetLike} />
             <input type="hidden" name="agentLike" value={filters.agentLike} />
+            <input type="hidden" name="page" value={page} />
+            <input type="hidden" name="pageSize" value={pageSize} />
 
             <FormField title="Experiment 名称" typeLabel="String" required>
               <input name="name" placeholder="Experiment 名称" required defaultValue={editingRow?.name ?? ""} />
@@ -502,6 +640,8 @@ export default async function ExperimentsPage({
                 <input type="hidden" name="statusFilter" value={filters.status} />
                 <input type="hidden" name="datasetLike" value={filters.datasetLike} />
                 <input type="hidden" name="agentLike" value={filters.agentLike} />
+                <input type="hidden" name="page" value={page} />
+                <input type="hidden" name="pageSize" value={pageSize} />
                 <SubmitButton className="danger-btn" pendingText="删除中...">
                   删除
                 </SubmitButton>

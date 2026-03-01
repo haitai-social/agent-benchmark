@@ -10,7 +10,7 @@ const nav = [
   { href: "/datasets", label: "Datasets", icon: DatasetIcon },
   { href: "/agents", label: "Agents", icon: AgentIcon },
   { href: "/evaluators", label: "Evaluators", icon: JudgeIcon },
-  { href: "/traces", label: "Trace", icon: TraceIcon },
+  { href: "/otel", label: "OTEL", icon: TraceIcon },
   { href: "/experiments", label: "Experiments", icon: FlaskIcon }
 ];
 

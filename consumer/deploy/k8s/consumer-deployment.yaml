@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-benchmark
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: benchmark-consumer-config
+  namespace: agent-benchmark
+data:
+  RABBITMQ_HOST: "rabbitmq.default.svc.cluster.local"
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_VHOST: "/"
+  RABBITMQ_EXPERIMENT_QUEUE: "haitai.agent.benchmark.experiment"
+  CONSUMER_CONCURRENT_CASES: "2"
+  CONSUMER_MAX_RETRIES: "3"
+  CONSUMER_CASE_TIMEOUT_SECONDS: "180"
+  CONSUMER_DOCKER_PULL_POLICY: "if-not-present"
+  REDIS_HOST: "tair-xxxx.redis.rds.aliyuncs.com"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  CONSUMER_REDIS_PROCESSING_LOCK_TTL_SECONDS: "3600"
+  CONSUMER_REDIS_PROCESSED_TTL_SECONDS: "86400"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: benchmark-consumer-secret
+  namespace: agent-benchmark
+type: Opaque
+stringData:
+  RABBITMQ_USER: "replace-me"
+  RABBITMQ_PASSWORD: "replace-me"
+  REDIS_USERNAME: "default"
+  REDIS_PASSWORD: "replace-me"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: benchmark-consumer
+  namespace: agent-benchmark
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: benchmark-consumer
+  template:
+    metadata:
+      labels:
+        app: benchmark-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: ghcr.io/haitai-social/agent-benchmark-consumer:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: benchmark-consumer-config
+            - secretRef:
+                name: benchmark-consumer-secret
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # 当前 consumer 需要 docker daemon 执行 docker run。
+          # 若你的集群节点提供 docker.sock，可启用以下挂载；否则请改为远程 DOCKER_HOST 方案。
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket

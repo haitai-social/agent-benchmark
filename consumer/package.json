@@ -1,8 +1,0 @@
-{
-  "name": "@arcloop/consumer",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "typecheck": "echo 'consumer not implemented yet'"
-  }
-}
