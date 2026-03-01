@@ -37,6 +37,15 @@ def map_logs_to_trajectory(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for idx, log in enumerate(ordered, start=1):
         event_ms = _to_epoch_ms(log.get("event_time") or log.get("observed_time") or log.get("created_at"))
         body = _log_body(log)
+        picked_attributes = _pick_key_attributes(log.get("attributes"))
+        event_attributes = [
+            {"key": "body", "value": body},
+            {"key": "severity_text", "value": str(log.get("severity_text") or "")},
+            {"key": "service.name", "value": str(log.get("service_name") or "")},
+        ]
+        for key in ("query", "results", "path", "content_preview", "final_answer"):
+            if key in picked_attributes:
+                event_attributes.append({"key": key, "value": picked_attributes[key]})
         trajectory.append(
             {
                 "step": idx,
@@ -48,15 +57,11 @@ def map_logs_to_trajectory(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "end_time_ms": event_ms,
                 "latency_ms": 0,
                 "status": log.get("severity_text"),
-                "attributes": _pick_key_attributes(log.get("attributes")),
+                "attributes": picked_attributes,
                 "events": [
                     {
                         "name": "log",
-                        "attributes": [
-                            {"key": "body", "value": body},
-                            {"key": "severity_text", "value": str(log.get("severity_text") or "")},
-                            {"key": "service.name", "value": str(log.get("service_name") or "")},
-                        ],
+                        "attributes": event_attributes,
                     }
                 ],
             }
@@ -118,6 +123,11 @@ def _pick_key_attributes(attributes: Any) -> dict[str, Any]:
         "db.operation",
         "benchmark.run_case_id",
         "benchmark.data_item_id",
+        "query",
+        "results",
+        "path",
+        "content_preview",
+        "final_answer",
     )
     picked: dict[str, Any] = {}
     for key in keys:

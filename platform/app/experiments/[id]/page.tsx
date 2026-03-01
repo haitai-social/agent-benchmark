@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { dbQuery } from "@/lib/db";
+import { dbQuery, engine } from "@/lib/db";
 import { formatDateTime } from "@/lib/datetime";
 import { PaginationControls } from "@/app/components/pagination-controls";
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
@@ -37,6 +37,14 @@ function formatLatencyMs(value: number | string | null) {
   const m = Math.floor(sec / 60);
   const s = Math.round(sec % 60);
   return `${m}m ${s}s`;
+}
+
+function diffMs(startedAt: string | null, finishedAt: string | null) {
+  if (!startedAt || !finishedAt) return null;
+  const start = new Date(startedAt).getTime();
+  const end = new Date(finishedAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return end - start;
 }
 
 function buildDetailHref(id: number, tab: string, q: string, status: string, scoreMin: string, scoreMax: string, page: number, pageSize: number) {
@@ -102,6 +110,9 @@ export default async function ExperimentDetailPage({
 
   const scoreMinNum = filters.scoreMin ? Number(filters.scoreMin) : null;
   const scoreMaxNum = filters.scoreMax ? Number(filters.scoreMax) : null;
+  const avgE2eMsExpr = engine === "mysql"
+    ? "AVG(CASE WHEN started_at IS NOT NULL AND finished_at IS NOT NULL THEN TIMESTAMPDIFF(MICROSECOND, started_at, finished_at) / 1000 ELSE NULL END)"
+    : "AVG(CASE WHEN started_at IS NOT NULL AND finished_at IS NOT NULL THEN EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000 ELSE NULL END)";
 
   const caseFilterParams = [id, filters.q, filters.status, filters.status, scoreMinNum, scoreMinNum, scoreMaxNum, scoreMaxNum];
   const caseCountResult = await dbQuery<{ total_count: number | string }>(
@@ -210,6 +221,7 @@ export default async function ExperimentDetailPage({
       avg_score: number | null;
       avg_latency: number | null;
       max_latency: number | null;
+      avg_e2e_ms: number | null;
       input_tokens: number | string | null;
       output_tokens: number | string | null;
     }>(
@@ -217,6 +229,7 @@ export default async function ExperimentDetailPage({
           AVG(final_score) AS avg_score,
           AVG(latency_ms) AS avg_latency,
           MAX(latency_ms) AS max_latency,
+          ${avgE2eMsExpr} AS avg_e2e_ms,
           SUM(COALESCE(input_tokens, 0)) AS input_tokens,
           SUM(COALESCE(output_tokens, 0)) AS output_tokens
        FROM run_cases
@@ -253,12 +266,11 @@ export default async function ExperimentDetailPage({
           finished_at: string | null;
           user_input: string;
           reference_output: unknown;
-          reference_trajectory: unknown;
         }>(
           `SELECT rc.id, rc.data_item_id, rc.attempt_no, rc.status, rc.final_score,
                   rc.latency_ms, rc.input_tokens, rc.output_tokens, rc.error_message, rc.logs,
                   rc.agent_trajectory, rc.agent_output, rc.usage_json, rc.started_at, rc.finished_at,
-                  di.user_input, di.reference_output, di.reference_trajectory
+                  di.user_input, di.reference_output
            FROM run_cases rc
            JOIN data_items di ON di.id = rc.data_item_id
            WHERE rc.experiment_id = $1 AND rc.id = $2
@@ -541,7 +553,7 @@ export default async function ExperimentDetailPage({
                 { label: "Case 执行", value: formatLatencyMs(avgTiming.caseExec / avgTimingDivisor) },
                 { label: "OTel 查询", value: formatLatencyMs(avgTiming.otelQuery / avgTimingDivisor) },
                 { label: "Scoring", value: formatLatencyMs(avgTiming.scorerTotal / avgTimingDivisor) },
-                { label: "总耗时", value: formatLatencyMs(avgTiming.total / avgTimingDivisor) }
+                { label: "总耗时", value: formatLatencyMs(summary.avg_e2e_ms) }
               ].map((item) => (
                 <div key={item.label} className="exp-stage-item">
                   <span className="exp-stage-label">{item.label}</span>
@@ -587,7 +599,7 @@ export default async function ExperimentDetailPage({
       ) : null}
 
       {activeTab === "config" ? (
-        <section className="grid">
+        <section className="grid exp-config-layout">
           <section className="card exp-config-card">
             <div className="section-title-row">
               <h2>实验基础配置</h2>
@@ -751,13 +763,14 @@ export default async function ExperimentDetailPage({
                   const timings = usage?.timings_ms && typeof usage.timings_ms === "object"
                     ? (usage.timings_ms as Record<string, unknown>)
                     : null;
-                  if (!timings) return "-";
+                  const e2eMs = diffMs(selectedCase.rows[0].started_at, selectedCase.rows[0].finished_at);
+                  if (!timings) return e2eMs == null ? "-" : `Total ${formatLatencyMs(e2eMs)}`;
                   return [
                     `Docker ${formatLatencyMs(Number(timings.sandbox_connect ?? 0))}`,
                     `Run ${formatLatencyMs(Number(timings.case_exec ?? 0))}`,
                     `OTel ${formatLatencyMs(Number(timings.otel_query ?? 0))}`,
                     `Score ${formatLatencyMs(Number(timings.scorer_total ?? 0))}`,
-                    `Total ${formatLatencyMs(Number(timings.total ?? 0))}`
+                    `Total ${formatLatencyMs(e2eMs == null ? Number(timings.total ?? 0) : e2eMs)}`
                   ].join(" | ");
                 })()}
               </p>

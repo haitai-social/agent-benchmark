@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
-import os
 import sys
 import time
 import urllib.error
@@ -27,10 +27,6 @@ class EventRecord(TypedDict):
 def _iso_now(offset_ms: int = 0) -> str:
     now = time.time() + (offset_ms / 1000.0)
     return datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
-
-
-def _otel_endpoint() -> str:
-    return "http://host.docker.internal:14318/api/otel"
 
 
 def _parse_session_jsonl(raw: str) -> list[SessionRecord]:
@@ -70,10 +66,9 @@ def _value_preview(value: object, limit: int = 800) -> str:
         return str(value)[:limit]
 
 
-def _read_session_jsonl_from_path_file() -> tuple[str, str]:
-    path_file = str(os.getenv("OPENCLAW_SESSION_PATH_FILE") or "/tmp/openclaw-last-session-path.txt").strip()
+def _read_session_jsonl_from_path_file(path_file: str) -> tuple[str, str]:
     if not path_file:
-        raise RuntimeError("missing OPENCLAW_SESSION_PATH_FILE")
+        raise RuntimeError("missing --session-path-file")
     marker_path = Path(path_file)
     if not marker_path.exists() or not marker_path.is_file():
         raise RuntimeError(f"session path file not found: {path_file}")
@@ -87,6 +82,36 @@ def _read_session_jsonl_from_path_file() -> tuple[str, str]:
     if not session_jsonl.strip():
         raise RuntimeError(f"session jsonl is empty: {session_path}")
     return session_path, session_jsonl
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Convert OpenClaw session jsonl into OTEL traces/logs.")
+    parser.add_argument(
+        "--session-path-file",
+        required=True,
+        help="File containing the absolute path of the OpenClaw session jsonl.",
+    )
+    parser.add_argument(
+        "--run-case-id",
+        required=True,
+        help="Run case ID injected into OTEL attributes.",
+    )
+    parser.add_argument(
+        "--experiment-id",
+        required=True,
+        help="Experiment ID injected into OTEL attributes.",
+    )
+    parser.add_argument(
+        "--otel-endpoint",
+        default="http://host.docker.internal:14318/api/otel",
+        help="OTEL mock ingestion endpoint base URL.",
+    )
+    parser.add_argument(
+        "--trace-id",
+        default="",
+        help="Optional trace_id override; defaults to random UUID4 hex.",
+    )
+    return parser.parse_args()
 
 
 def _event_attributes(payload: object) -> list[dict[str, object]]:
@@ -359,7 +384,8 @@ def _inserted_count(response_body: str) -> int:
 
 
 def main() -> int:
-    session_path, session_jsonl = _read_session_jsonl_from_path_file()
+    args = _parse_args()
+    session_path, session_jsonl = _read_session_jsonl_from_path_file(str(args.session_path_file).strip())
 
     records = _parse_session_jsonl(session_jsonl)
     if not records:
@@ -380,11 +406,11 @@ def main() -> int:
                 }
             )
 
-    run_case_id = str(os.getenv("BENCHMARK_RUN_CASE_ID") or "")
-    experiment_id = str(os.getenv("BENCHMARK_EXPERIMENT_ID") or "")
-    trace_id = uuid.uuid4().hex
+    run_case_id = str(args.run_case_id).strip()
+    experiment_id = str(args.experiment_id).strip()
+    trace_id = str(args.trace_id or "").strip() or uuid.uuid4().hex
 
-    endpoint = _otel_endpoint()
+    endpoint = str(args.otel_endpoint).strip().rstrip("/")
     traces_url = f"{endpoint}/v1/traces"
     logs_url = f"{endpoint}/v1/logs"
 

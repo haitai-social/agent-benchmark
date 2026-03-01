@@ -13,6 +13,26 @@ type JudgeResult = {
   reason: string;
 };
 
+function renderAsTemplate(template: string, context: Record<string, unknown>): string {
+  return template.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}/g, (_match, rawPath: string) => {
+    const value = resolvePath(context, rawPath);
+    if (typeof value === "string") return value;
+    return JSON.stringify(value, null, 2);
+  });
+}
+
+function resolvePath(context: Record<string, unknown>, path: string): unknown {
+  const segments = path.split(".");
+  let current: unknown = context;
+  for (const segment of segments) {
+    if (!current || typeof current !== "object" || !(segment in current)) {
+      throw new Error(`E_TEMPLATE_VARIABLE_NOT_FOUND: ${path}`);
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
 function clampScore(score: number) {
   if (score >= 0.9) return 1;
   if (score >= 0.6) return 0.5;
@@ -58,10 +78,23 @@ async function openAiJudge(evaluator: Evaluator, input: JudgeInput): Promise<Jud
   if (!apiKey) return null;
 
   try {
-    const prompt = evaluator.prompt_template
-      .replace("{{trajectory}}", JSON.stringify(input.trajectory, null, 2))
-      .replace("{{agent_output}}", JSON.stringify(input.agentOutput, null, 2))
-      .replace("{{tools}}", JSON.stringify(input.tools, null, 2));
+    const prompt = renderAsTemplate(evaluator.prompt_template, {
+      data_item: {
+        input: input.userInput,
+        session: "",
+        trajectory: null,
+        output: null,
+        trace_id: null
+      },
+      run: {
+        output: input.agentOutput,
+        trajectory: input.trajectory,
+        status: "unknown",
+        logs: "",
+        latency_ms: 0
+      },
+      tools: input.tools
+    });
 
     const response = await fetch(baseUrl, {
       method: "POST",

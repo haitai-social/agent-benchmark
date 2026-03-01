@@ -25,8 +25,6 @@ type QueueDispatchPayload = {
     attempt_no: number;
     session_jsonl: string;
     user_input: string;
-    trace_id: string | null;
-    reference_trajectory: unknown;
     reference_output: unknown;
   }>;
   triggered_by: string;

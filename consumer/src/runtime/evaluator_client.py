@@ -6,14 +6,32 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+from runtime.template_renderer import render_as_template
+
+
+@dataclass(frozen=True)
+class EvaluatorDataItem:
+    id: int
+    input: str
+    session: str
+    trajectory: Any
+    output: Any
+    trace_id: str | None
+
+
+@dataclass(frozen=True)
+class EvaluatorRun:
+    output: Any
+    trajectory: Any
+    status: str
+    logs: str
+    latency_ms: int
 
 
 @dataclass(frozen=True)
 class EvaluatorCallInput:
-    user_input: str
-    trajectory: Any
-    agent_output: Any
-    reference_output: Any
+    data_item: EvaluatorDataItem
+    run: EvaluatorRun
     tools: Any
 
 
@@ -68,16 +86,25 @@ def call_evaluator(
 
 def _render_prompt(template: str, payload: EvaluatorCallInput) -> str:
     prompt = template or ""
-    replacements = {
-        "{{user_input}}": payload.user_input,
-        "{{trajectory}}": json.dumps(payload.trajectory, ensure_ascii=False, indent=2),
-        "{{agent_output}}": json.dumps(payload.agent_output, ensure_ascii=False, indent=2),
-        "{{reference_output}}": json.dumps(payload.reference_output, ensure_ascii=False, indent=2),
-        "{{tools}}": json.dumps(payload.tools, ensure_ascii=False, indent=2),
+    context: dict[str, Any] = {
+        "data_item": {
+            "id": payload.data_item.id,
+            "input": payload.data_item.input,
+            "session": payload.data_item.session,
+            "trajectory": payload.data_item.trajectory,
+            "output": payload.data_item.output,
+            "trace_id": payload.data_item.trace_id,
+        },
+        "run": {
+            "output": payload.run.output,
+            "trajectory": payload.run.trajectory,
+            "status": payload.run.status,
+            "logs": payload.run.logs,
+            "latency_ms": payload.run.latency_ms,
+        },
+        "tools": payload.tools,
     }
-    for key, value in replacements.items():
-        prompt = prompt.replace(key, value)
-    return prompt
+    return render_as_template(prompt, context)
 
 
 def _call_openai_compatible(

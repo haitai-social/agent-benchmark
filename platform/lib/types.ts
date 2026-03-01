@@ -11,8 +11,7 @@ export type DataItem = {
   session_jsonl: string;
   user_input: string;
   reference_output: unknown;
-  trace_id: string | null;
-  reference_trajectory: unknown | null;
+  mock_config?: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -34,7 +33,6 @@ export type Agent = {
   name: string;
   description: string;
   runtime_spec_json: Record<string, unknown>;
-  status: string;
   created_at: string;
   updated_at: string;
 };

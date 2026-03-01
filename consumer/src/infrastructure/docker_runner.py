@@ -9,6 +9,7 @@ from typing import Any
 
 from domain.contracts import CaseExecutionResult, ExperimentRunRequested, RunCaseInput
 from .mock_gateway.runtime import start_mock_gateway
+from runtime.runtime_command_template import render_runtime_command_template
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +53,29 @@ class DockerRunner:
         container_name = f"bench-case-{run_case.run_case_id}"
         try:
             self._docker_pull(image)
-            env = self._build_env(message, run_case, sidecar.endpoint if sidecar else None)
-            container_id = self._docker_run(image, container_name, env, runtime_spec)
+            mock_base_url = sidecar.endpoint if sidecar else None
+            env = self._build_env(message, run_case, mock_base_url)
+            startup_command_template = str(runtime_spec.get("sandbox_start_command") or runtime_spec.get("agent_command") or "").strip()
+            startup_command = render_runtime_command_template(
+                template=startup_command_template,
+                message=message,
+                run_case=run_case,
+                mock_base_url=mock_base_url,
+            )
+            container_id = self._docker_run(image, container_name, env, startup_command)
             result.container_id = container_id
-            case_exec_command = str(runtime_spec.get("case_exec_command") or "").strip()
-            after_exec_command = str(runtime_spec.get("after_exec_command") or "").strip()
+            case_exec_command = render_runtime_command_template(
+                template=str(runtime_spec.get("case_exec_command") or "").strip(),
+                message=message,
+                run_case=run_case,
+                mock_base_url=mock_base_url,
+            )
+            after_exec_command = render_runtime_command_template(
+                template=str(runtime_spec.get("after_exec_command") or "").strip(),
+                message=message,
+                run_case=run_case,
+                mock_base_url=mock_base_url,
+            )
             if case_exec_command:
                 logger.info("code=CASE_EXEC_MODE mode=sandbox_exec run_case_id=%s", run_case.run_case_id)
                 self._wait_container_ready(container_name, runtime_spec)
@@ -124,7 +143,7 @@ class DockerRunner:
         )
         return proc.returncode == 0
 
-    def _docker_run(self, image: str, container_name: str, env: dict[str, str], runtime_spec: dict[str, Any]) -> str:
+    def _docker_run(self, image: str, container_name: str, env: dict[str, str], startup_command: str) -> str:
         cmd = ["docker", "run", "-d", "--name", container_name]
         # Linux engines usually need explicit host-gateway mapping.
         # Docker Desktop provides host.docker.internal natively; overriding it can break routing.
@@ -134,7 +153,7 @@ class DockerRunner:
             cmd.extend(["--network", self.docker_network])
         for key, value in sorted(env.items()):
             cmd.extend(["-e", f"{key}={value}"])
-        command_override = self.agent_exec_command or str(runtime_spec.get("agent_command") or "").strip()
+        command_override = self.agent_exec_command or startup_command
         if command_override:
             cmd.extend([image, "sh", "-lc", command_override])
         else:
@@ -214,49 +233,9 @@ class DockerRunner:
             raise RuntimeError(f"{timeout_code}: {timeout_seconds}s cmd={' '.join(cmd)}") from exc
 
     def _build_env(self, message: ExperimentRunRequested, run_case: RunCaseInput, mock_base_url: str | None) -> dict[str, str]:
-        runtime_spec = dict(message.agent.runtime_spec_json or {})
-        env_from_spec = runtime_spec.get("agent_env_template", {})
-        env: dict[str, str] = {
-            "BENCHMARK_EXPERIMENT_ID": str(message.experiment.id),
-            "BENCHMARK_DATASET_ID": str(message.dataset.id),
-            "BENCHMARK_RUN_CASE_ID": str(run_case.run_case_id),
-            "BENCHMARK_DATA_ITEM_ID": str(run_case.data_item_id),
-            "BENCHMARK_ATTEMPT_NO": str(run_case.attempt_no),
-            "BENCHMARK_USER_INPUT": run_case.user_input,
-            "BENCHMARK_SESSION_JSONL": run_case.session_jsonl,
-            "BENCHMARK_AGENT_RUNTIME_SPEC": json.dumps(message.agent.runtime_spec_json),
-            "BENCHMARK_MOCK_CONFIG": json.dumps(run_case.mock_config, default=lambda o: o.__dict__),
-        }
-        if isinstance(env_from_spec, dict):
-            for key, value in env_from_spec.items():
-                if isinstance(key, str):
-                    env[key] = str(value)
-        if run_case.trace_id:
-            env["BENCHMARK_TRACE_ID"] = run_case.trace_id
-        existing_resource_attrs = str(env.get("OTEL_RESOURCE_ATTRIBUTES") or "").strip()
-        injected_resource_attrs = ",".join(
-            [
-                f"benchmark.experiment_id={message.experiment.id}",
-                f"benchmark.run_case_id={run_case.run_case_id}",
-                f"benchmark.data_item_id={run_case.data_item_id}",
-            ]
-        )
-        env["OTEL_RESOURCE_ATTRIBUTES"] = (
-            f"{existing_resource_attrs},{injected_resource_attrs}"
-            if existing_resource_attrs
-            else injected_resource_attrs
-        )
-        existing_headers = str(env.get("OTEL_EXPORTER_OTLP_HEADERS") or "").strip()
-        injected_headers = ",".join(
-            [
-                f"x-benchmark-experiment-id={message.experiment.id}",
-                f"x-benchmark-run-case-id={run_case.run_case_id}",
-                f"x-benchmark-data-item-id={run_case.data_item_id}",
-            ]
-        )
-        merged_headers = f"{existing_headers},{injected_headers}" if existing_headers else injected_headers
-        env["OTEL_EXPORTER_OTLP_HEADERS"] = merged_headers
-        env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = merged_headers
+        del message
+        del run_case
+        env: dict[str, str] = {}
         if mock_base_url:
             env.update(self._build_mock_proxy_env(mock_base_url))
         return env

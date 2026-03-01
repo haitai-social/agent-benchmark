@@ -804,7 +804,8 @@ a {
 }
 
 .table-card {
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: visible;
 }
 
 .tag-row {
@@ -841,8 +842,9 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: nowrap;
-  white-space: nowrap;
+  flex-wrap: wrap;
+  white-space: normal;
+  row-gap: 4px;
 }
 
 .bulk-select-cell {
@@ -1312,18 +1314,12 @@ a {
 
 .agents-table th:nth-child(7),
 .agents-table td:nth-child(7) {
-  width: 90px;
+  width: 160px;
   white-space: nowrap;
 }
 
 .agents-table th:nth-child(8),
 .agents-table td:nth-child(8) {
-  width: 160px;
-  white-space: nowrap;
-}
-
-.agents-table th:nth-child(9),
-.agents-table td:nth-child(9) {
   width: 88px;
   white-space: nowrap;
 }
@@ -1351,26 +1347,38 @@ a {
 
 .datasets-table th:nth-child(2),
 .datasets-table td:nth-child(2) {
-  width: 74px;
+  width: 72px;
   white-space: nowrap;
 }
 
 .datasets-table th:nth-child(3),
 .datasets-table td:nth-child(3) {
-  width: 180px;
+  width: 176px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .datasets-table th:nth-child(4),
 .datasets-table td:nth-child(4) {
-  width: 210px;
+  width: 206px;
+  white-space: normal;
 }
 
 .datasets-table th:nth-child(5),
 .datasets-table td:nth-child(5),
 .datasets-table th:nth-child(6),
 .datasets-table td:nth-child(6) {
-  width: 90px;
+  width: 84px;
   white-space: nowrap;
+}
+
+.datasets-table th:nth-child(7),
+.datasets-table td:nth-child(7) {
+  width: 186px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .datasets-table th:nth-child(8),
@@ -1379,7 +1387,7 @@ a {
 .datasets-table td:nth-child(9),
 .datasets-table th:nth-child(10),
 .datasets-table td:nth-child(10) {
-  width: 96px;
+  width: 124px;
   white-space: nowrap;
 }
 
@@ -1390,25 +1398,28 @@ a {
 
 .data-items-table th:nth-child(2),
 .data-items-table td:nth-child(2) {
-  width: 74px;
+  width: 72px;
   white-space: nowrap;
 }
 
 .data-items-table th:nth-child(3),
 .data-items-table td:nth-child(3) {
-  width: 220px;
+  width: 190px;
+  white-space: normal;
 }
 
 .data-items-table th:nth-child(4),
 .data-items-table td:nth-child(4) {
-  width: 200px;
+  width: 176px;
+  white-space: normal;
 }
 
 .data-items-table th:nth-child(5),
 .data-items-table td:nth-child(5),
 .data-items-table th:nth-child(6),
 .data-items-table td:nth-child(6) {
-  width: 220px;
+  width: 194px;
+  white-space: normal;
 }
 
 .data-items-table th:nth-child(7),
@@ -1417,25 +1428,17 @@ a {
 .data-items-table td:nth-child(8),
 .data-items-table th:nth-child(9),
 .data-items-table td:nth-child(9) {
-  width: 96px;
+  width: 126px;
   white-space: nowrap;
 }
 
 .traces-table th:nth-child(1),
-.traces-table td:nth-child(1),
-.otel-traces-table th:nth-child(1),
-.otel-traces-table td:nth-child(1),
-.otel-logs-table th:nth-child(1),
-.otel-logs-table td:nth-child(1) {
+.traces-table td:nth-child(1) {
   width: 40px;
 }
 
 .traces-table th:nth-child(2),
-.traces-table td:nth-child(2),
-.otel-traces-table th:nth-child(2),
-.otel-traces-table td:nth-child(2),
-.otel-logs-table th:nth-child(2),
-.otel-logs-table td:nth-child(2) {
+.traces-table td:nth-child(2) {
   width: 74px;
   white-space: nowrap;
 }
@@ -1443,15 +1446,7 @@ a {
 .traces-table th:nth-child(3),
 .traces-table td:nth-child(3),
 .traces-table th:nth-child(4),
-.traces-table td:nth-child(4),
-.otel-traces-table th:nth-child(3),
-.otel-traces-table td:nth-child(3),
-.otel-traces-table th:nth-child(4),
-.otel-traces-table td:nth-child(4),
-.otel-logs-table th:nth-child(3),
-.otel-logs-table td:nth-child(3),
-.otel-logs-table th:nth-child(4),
-.otel-logs-table td:nth-child(4) {
+.traces-table td:nth-child(4) {
   width: 180px;
 }
 
@@ -1462,37 +1457,140 @@ a {
 .traces-table th:nth-child(8),
 .traces-table td:nth-child(8),
 .traces-table th:nth-child(9),
-.traces-table td:nth-child(9),
-.otel-traces-table th:nth-child(6),
-.otel-traces-table td:nth-child(6),
-.otel-traces-table th:nth-child(7),
-.otel-traces-table td:nth-child(7),
-.otel-traces-table th:nth-child(8),
-.otel-traces-table td:nth-child(8),
-.otel-traces-table th:nth-child(9),
-.otel-traces-table td:nth-child(9) {
+.traces-table td:nth-child(9) {
   width: 96px;
   white-space: nowrap;
 }
 
-.otel-logs-table th:nth-child(5),
-.otel-logs-table td:nth-child(5),
-.otel-logs-table th:nth-child(6),
-.otel-logs-table td:nth-child(6),
-.otel-logs-table th:nth-child(8),
-.otel-logs-table td:nth-child(8),
-.otel-logs-table th:nth-child(9),
-.otel-logs-table td:nth-child(9) {
-  width: 96px;
+/* OTEL tables: standalone layout rules to avoid overlap and uneven spacing */
+.otel-traces-table,
+.otel-logs-table {
+  table-layout: fixed;
+}
+
+.otel-traces-table th,
+.otel-traces-table td,
+.otel-logs-table th,
+.otel-logs-table td {
+  vertical-align: top;
+}
+
+.otel-traces-table th:nth-child(1),
+.otel-traces-table td:nth-child(1),
+.otel-logs-table th:nth-child(1),
+.otel-logs-table td:nth-child(1) {
+  width: 40px;
+}
+
+.otel-traces-table th:nth-child(2),
+.otel-traces-table td:nth-child(2),
+.otel-logs-table th:nth-child(2),
+.otel-logs-table td:nth-child(2) {
+  width: 72px;
   white-space: nowrap;
+}
+
+.otel-traces-table th:nth-child(3),
+.otel-traces-table td:nth-child(3),
+.otel-traces-table th:nth-child(4),
+.otel-traces-table td:nth-child(4) {
+  width: 148px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.otel-traces-table th:nth-child(5),
+.otel-traces-table td:nth-child(5) {
+  width: 220px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.otel-traces-table th:nth-child(6),
+.otel-traces-table td:nth-child(6) {
+  width: 132px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.otel-traces-table th:nth-child(7),
+.otel-traces-table td:nth-child(7) {
+  width: 110px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.otel-traces-table th:nth-child(8),
+.otel-traces-table td:nth-child(8) {
+  width: 168px;
+  white-space: nowrap;
+}
+
+.otel-traces-table th:nth-child(9),
+.otel-traces-table td:nth-child(9) {
+  width: 128px;
+  white-space: nowrap;
+}
+
+.otel-logs-table th:nth-child(3),
+.otel-logs-table td:nth-child(3),
+.otel-logs-table th:nth-child(4),
+.otel-logs-table td:nth-child(4) {
+  width: 150px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.otel-logs-table th:nth-child(5),
+.otel-logs-table td:nth-child(5) {
+  width: 132px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.otel-logs-table th:nth-child(6),
+.otel-logs-table td:nth-child(6) {
+  width: 104px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .otel-logs-table th:nth-child(7),
 .otel-logs-table td:nth-child(7) {
-  width: 300px;
+  width: 260px;
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.otel-logs-table th:nth-child(8),
+.otel-logs-table td:nth-child(8) {
+  width: 168px;
+  white-space: nowrap;
+}
+
+.otel-logs-table th:nth-child(9),
+.otel-logs-table td:nth-child(9) {
+  width: 128px;
+  white-space: nowrap;
+}
+
+.otel-traces-table td:nth-child(3) code,
+.otel-traces-table td:nth-child(4) code,
+.otel-logs-table td:nth-child(3) code,
+.otel-logs-table td:nth-child(4) code {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.32;
 }
 
 .exp-metric-card {
@@ -1557,6 +1655,11 @@ a {
   padding: 10px 12px;
 }
 
+.exp-config-layout {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  align-items: start;
+}
+
 .exp-config-card .section-title-row {
   margin-bottom: 6px;
 }
@@ -1587,6 +1690,15 @@ a {
   color: #0f172a;
   font-size: 13px;
   line-height: 1.3;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.exp-config-item dd code {
+  display: inline-block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -2094,6 +2206,55 @@ a {
   letter-spacing: 0;
 }
 
+.field-title-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.field-help-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid #9ca3af;
+  border-radius: 999px;
+  color: #4b5563;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.field-help-tooltip {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  top: calc(100% + 8px);
+  min-width: 320px;
+  max-width: min(560px, 80vw);
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.45;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.14);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.field-help-icon:hover .field-help-tooltip,
+.field-help-icon:focus .field-help-tooltip,
+.field-help-icon:focus-visible .field-help-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
 .type-pill {
   font-size: 11px;
   padding: 2px 7px;
@@ -2169,6 +2330,89 @@ a {
   font-weight: 800;
   letter-spacing: -0.02em;
   margin-top: 4px;
+}
+
+.overview-page {
+  gap: 14px;
+}
+
+.overview-kpi-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.overview-kpi-card {
+  min-height: 148px;
+  display: grid;
+  gap: 8px;
+  align-content: space-between;
+  border-color: #d9e2ec;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.overview-kpi-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.overview-kpi-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  display: inline-grid;
+  place-items: center;
+  background: #eef4fb;
+  color: #1f3b57;
+}
+
+.overview-kpi-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #475569;
+  line-height: 1.2;
+}
+
+.overview-kpi-value {
+  font-size: 42px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #0f172a;
+}
+
+.overview-kpi-meta {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.overview-info-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.overview-info-card {
+  min-height: 154px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  border-color: #d9e2ec;
+}
+
+.overview-info-card h2 {
+  margin: 0;
+  font-size: 16px;
+  color: #0f172a;
+}
+
+.overview-info-card p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #475569;
 }
 
 .login-wrap {
@@ -2774,6 +3018,10 @@ code {
 }
 
 @media (max-width: 900px) {
+  .exp-config-layout {
+    grid-template-columns: 1fr;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
   }
@@ -2993,4 +3241,70 @@ code {
     opacity: 1;
     transform: translateY(0) scale(1);
   }
+}
+
+/* Adaptive table safety net: prevent overlap/overflow when columns change */
+.datasets-table,
+.data-items-table,
+.traces-table,
+.otel-traces-table,
+.otel-logs-table,
+.agents-table,
+.evaluators-table,
+.exp-runcase-table {
+  width: 100%;
+  table-layout: auto;
+}
+
+.datasets-table th,
+.datasets-table td,
+.data-items-table th,
+.data-items-table td,
+.traces-table th,
+.traces-table td,
+.otel-traces-table th,
+.otel-traces-table td,
+.otel-logs-table th,
+.otel-logs-table td,
+.agents-table th,
+.agents-table td,
+.evaluators-table th,
+.evaluators-table td,
+.exp-runcase-table th,
+.exp-runcase-table td {
+  width: auto !important;
+  min-width: 0;
+  max-width: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.datasets-table td code,
+.data-items-table td code,
+.traces-table td code,
+.otel-traces-table td code,
+.otel-logs-table td code,
+.agents-table td code,
+.evaluators-table td code,
+.exp-runcase-table td code {
+  display: inline-block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.datasets-table .bulk-select-cell,
+.data-items-table .bulk-select-cell,
+.traces-table .bulk-select-cell,
+.otel-traces-table .bulk-select-cell,
+.otel-logs-table .bulk-select-cell,
+.agents-table .bulk-select-cell,
+.evaluators-table .bulk-select-cell,
+.exp-runcase-table .bulk-select-cell {
+  width: 40px !important;
+  min-width: 40px;
+  white-space: nowrap;
+  text-align: center;
 }

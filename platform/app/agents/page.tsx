@@ -8,25 +8,36 @@ import { BulkSelectionControls } from "@/app/components/bulk-selection-controls"
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
 import { parseSelectedIds } from "@/lib/form-ids";
 import { requireUser } from "@/lib/supabase-auth";
+import {
+  formatTemplateVariableDetailLines,
+  formatTemplateVariableList,
+  getTemplateVariableGroup,
+} from "@/lib/template-vars";
 import { AgentIcon, FilterIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { SubmitButton } from "../components/submit-button";
 import { TextareaWithFileUpload } from "../components/textarea-with-file-upload";
 
-const defaultRuntimeSpec = {
+const runtimeSpecDefaults = {
   runtime_type: "agno_docker",
   agent_image: "ghcr.io/example/agno-agent@sha256:replace-me",
   agent_command: "",
-  agent_env_template: {},
   sandbox: { timeout_seconds: 180 },
   services: [],
-  scorers: [{ scorer_key: "task_success" }]
+  scorers: [{ scorer_key: "task_success" }],
+  sandbox_start_command: "",
+  case_exec_command: "python /workspace/main.py",
+  after_exec_command: "",
 };
 
 type RuntimeSpec = {
   runtime_type?: string;
   agent_image?: string;
+  sandbox_start_command?: string;
+  case_exec_command?: string;
+  after_exec_command?: string;
   services?: unknown[];
   scorers?: unknown[];
+  [key: string]: unknown;
 };
 
 function parseRuntimeSpec(value: unknown): RuntimeSpec {
@@ -36,18 +47,87 @@ function parseRuntimeSpec(value: unknown): RuntimeSpec {
   return value as RuntimeSpec;
 }
 
-function buildListHref(q: string, status: string, keyLike: string, page: number, pageSize: number) {
+const RUNTIME_CORE_KEYS = [
+  "agent_image",
+  "sandbox_start_command",
+  "case_exec_command",
+  "after_exec_command",
+] as const;
+
+type RuntimeCoreField = (typeof RUNTIME_CORE_KEYS)[number];
+
+type RuntimeCoreFields = {
+  agentImage: string;
+  sandboxStartCommand: string;
+  caseExecCommand: string;
+  afterExecCommand: string;
+};
+
+function splitRuntimeSpec(runtimeSpec: RuntimeSpec | null): { core: RuntimeCoreFields; additional: Record<string, unknown> } {
+  const parsed = parseRuntimeSpec(runtimeSpec ?? {});
+  const additional: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if ((RUNTIME_CORE_KEYS as readonly string[]).includes(key)) continue;
+    additional[key] = value;
+  }
+  return {
+    core: {
+      agentImage: String(parsed.agent_image ?? runtimeSpecDefaults.agent_image).trim(),
+      sandboxStartCommand: String(parsed.sandbox_start_command ?? "").trim(),
+      caseExecCommand: String(parsed.case_exec_command ?? runtimeSpecDefaults.case_exec_command).trim(),
+      afterExecCommand: String(parsed.after_exec_command ?? "").trim(),
+    },
+    additional: Object.keys(additional).length > 0 ? additional : {
+      runtime_type: runtimeSpecDefaults.runtime_type,
+      agent_command: runtimeSpecDefaults.agent_command,
+      sandbox: runtimeSpecDefaults.sandbox,
+      services: runtimeSpecDefaults.services,
+      scorers: runtimeSpecDefaults.scorers,
+    },
+  };
+}
+
+function parseAdditionalRuntimeSpec(raw: string): Record<string, unknown> {
+  const value = raw.trim();
+  if (!value) return {};
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("E_ADDITIONAL_RUNTIME_SPEC_OBJECT_REQUIRED");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function hasCoreRuntimeKeys(runtimeSpec: Record<string, unknown>): boolean {
+  return RUNTIME_CORE_KEYS.some((key) => key in runtimeSpec);
+}
+
+function buildRuntimeSpec(core: RuntimeCoreFields, additional: Record<string, unknown>): Record<string, unknown> {
+  const nextAdditional = { ...additional };
+  for (const key of RUNTIME_CORE_KEYS) {
+    if (key in nextAdditional) {
+      delete nextAdditional[key];
+    }
+  }
+  return {
+    ...nextAdditional,
+    agent_image: core.agentImage,
+    sandbox_start_command: core.sandboxStartCommand,
+    case_exec_command: core.caseExecCommand,
+    after_exec_command: core.afterExecCommand,
+  };
+}
+
+function buildListHref(q: string, keyLike: string, page: number, pageSize: number) {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
-  if (status !== "all") params.set("status", status);
   if (keyLike) params.set("keyLike", keyLike);
   if (page > 1) params.set("page", String(page));
   if (pageSize !== 10) params.set("pageSize", String(pageSize));
   return params.size > 0 ? `/agents?${params.toString()}` : "/agents";
 }
 
-function buildErrorHref(q: string, status: string, keyLike: string, page: number, pageSize: number, errorMessage: string) {
-  const base = buildListHref(q, status, keyLike, page, pageSize);
+function buildErrorHref(q: string, keyLike: string, page: number, pageSize: number, errorMessage: string) {
+  const base = buildListHref(q, keyLike, page, pageSize);
   const joiner = base.includes("?") ? "&" : "?";
   return `${base}${joiner}error=${encodeURIComponent(errorMessage)}`;
 }
@@ -60,37 +140,48 @@ async function createAgent(formData: FormData) {
   const version = String(formData.get("version") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
-  const runtimeSpecRaw = String(formData.get("runtimeSpec") ?? "{}");
+  const agentImage = String(formData.get("agentImage") ?? "").trim();
+  const sandboxStartCommand = String(formData.get("sandboxStartCommand") ?? "").trim();
+  const caseExecCommand = String(formData.get("caseExecCommand") ?? "").trim();
+  const afterExecCommand = String(formData.get("afterExecCommand") ?? "").trim();
+  const additionalRuntimeSpecRaw = String(formData.get("additionalRuntimeSpec") ?? "{}");
   const q = String(formData.get("q") ?? "").trim();
-  const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
   const page = parsePage(String(formData.get("page") ?? "1"));
   const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
-  let runtimeSpec: Record<string, unknown>;
+  let additionalRuntimeSpec: Record<string, unknown>;
   try {
-    runtimeSpec = JSON.parse(runtimeSpecRaw) as Record<string, unknown>;
+    additionalRuntimeSpec = parseAdditionalRuntimeSpec(additionalRuntimeSpecRaw);
   } catch {
-    redirect(buildErrorHref(q, status, keyLike, page, pageSize, "Runtime Spec 必须是合法 JSON"));
+    redirect(buildErrorHref(q, keyLike, page, pageSize, "Additional Runtime Spec 必须是合法 JSON 对象"));
   }
-  if (!runtimeSpec || typeof runtimeSpec !== "object" || Array.isArray(runtimeSpec)) {
-    redirect(buildErrorHref(q, status, keyLike, page, pageSize, "Runtime Spec 必须是 JSON 对象"));
+  if (hasCoreRuntimeKeys(additionalRuntimeSpec)) {
+    redirect(buildErrorHref(q, keyLike, page, pageSize, "Additional Runtime Spec 不能包含核心字段（agent_image/sandbox_start_command/case_exec_command/after_exec_command）"));
   }
-  const dockerImage = String(runtimeSpec.agent_image ?? "").trim();
-  if (!agentKey || !version || !name || !dockerImage) {
-    redirect(buildErrorHref(q, status, keyLike, page, pageSize, "请填写 name/agentKey/version，且 Runtime Spec 必须包含 agent_image"));
+  const runtimeSpec = buildRuntimeSpec(
+    {
+      agentImage,
+      sandboxStartCommand,
+      caseExecCommand,
+      afterExecCommand,
+    },
+    additionalRuntimeSpec,
+  );
+  if (!agentKey || !version || !name || !agentImage || !caseExecCommand) {
+    redirect(buildErrorHref(q, keyLike, page, pageSize, "请填写 name/agentKey/version/agent_image/case_exec_command"));
   }
 
   await dbQuery(
-    `INSERT INTO agents (agent_key, version, name, description, docker_image, openapi_spec, status, metadata, runtime_spec_json, created_by, updated_by, updated_at)
-     SELECT $1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $9, CURRENT_TIMESTAMP
+    `INSERT INTO agents (agent_key, version, name, description, docker_image, openapi_spec, metadata, runtime_spec_json, created_by, updated_by, updated_at)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $9, CURRENT_TIMESTAMP
      WHERE NOT EXISTS (SELECT 1 FROM agents WHERE agent_key = $10 AND version = $11 AND deleted_at IS NULL)`,
     [
       agentKey,
       version,
       name,
       description,
-      dockerImage,
+      agentImage,
       JSON.stringify({}),
       JSON.stringify({}),
       JSON.stringify(runtimeSpec),
@@ -101,7 +192,7 @@ async function createAgent(formData: FormData) {
   );
 
   revalidatePath("/agents");
-  redirect(buildListHref(q, status, keyLike, page, pageSize));
+  redirect(buildListHref(q, keyLike, page, pageSize));
 }
 
 async function updateAgent(formData: FormData) {
@@ -114,26 +205,36 @@ async function updateAgent(formData: FormData) {
   const version = String(formData.get("version") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
-  const runtimeSpecRaw = String(formData.get("runtimeSpec") ?? "{}");
-  const statusValue = String(formData.get("status") ?? "active").trim();
+  const agentImage = String(formData.get("agentImage") ?? "").trim();
+  const sandboxStartCommand = String(formData.get("sandboxStartCommand") ?? "").trim();
+  const caseExecCommand = String(formData.get("caseExecCommand") ?? "").trim();
+  const afterExecCommand = String(formData.get("afterExecCommand") ?? "").trim();
+  const additionalRuntimeSpecRaw = String(formData.get("additionalRuntimeSpec") ?? "{}");
   const q = String(formData.get("q") ?? "").trim();
-  const statusFilter = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
   const page = parsePage(String(formData.get("page") ?? "1"));
   const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
 
-  let runtimeSpec: Record<string, unknown>;
+  let additionalRuntimeSpec: Record<string, unknown>;
   try {
-    runtimeSpec = JSON.parse(runtimeSpecRaw) as Record<string, unknown>;
+    additionalRuntimeSpec = parseAdditionalRuntimeSpec(additionalRuntimeSpecRaw);
   } catch {
-    redirect(buildErrorHref(q, statusFilter, keyLike, page, pageSize, "Runtime Spec 必须是合法 JSON"));
+    redirect(buildErrorHref(q, keyLike, page, pageSize, "Additional Runtime Spec 必须是合法 JSON 对象"));
   }
-  if (!runtimeSpec || typeof runtimeSpec !== "object" || Array.isArray(runtimeSpec)) {
-    redirect(buildErrorHref(q, statusFilter, keyLike, page, pageSize, "Runtime Spec 必须是 JSON 对象"));
+  if (hasCoreRuntimeKeys(additionalRuntimeSpec)) {
+    redirect(buildErrorHref(q, keyLike, page, pageSize, "Additional Runtime Spec 不能包含核心字段（agent_image/sandbox_start_command/case_exec_command/after_exec_command）"));
   }
-  const dockerImage = String(runtimeSpec.agent_image ?? "").trim();
-  if (!idRaw || !Number.isInteger(id) || id <= 0 || !agentKey || !version || !name || !dockerImage) {
-    redirect(buildErrorHref(q, statusFilter, keyLike, page, pageSize, "更新失败：请填写完整字段，且 Runtime Spec 必须包含 agent_image"));
+  const runtimeSpec = buildRuntimeSpec(
+    {
+      agentImage,
+      sandboxStartCommand,
+      caseExecCommand,
+      afterExecCommand,
+    },
+    additionalRuntimeSpec,
+  );
+  if (!idRaw || !Number.isInteger(id) || id <= 0 || !agentKey || !version || !name || !agentImage || !caseExecCommand) {
+    redirect(buildErrorHref(q, keyLike, page, pageSize, "更新失败：请填写完整字段（含 agent_image/case_exec_command）"));
   }
 
   await dbQuery(
@@ -144,15 +245,14 @@ async function updateAgent(formData: FormData) {
          description = $5,
          docker_image = $6,
          runtime_spec_json = $7,
-         status = $8,
-         updated_by = $9,
+         updated_by = $8,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND deleted_at IS NULL`,
-    [id, agentKey, version, name, description, dockerImage, JSON.stringify(runtimeSpec), statusValue || "active", user.id]
+    [id, agentKey, version, name, description, agentImage, JSON.stringify(runtimeSpec), user.id]
   );
 
   revalidatePath("/agents");
-  redirect(buildListHref(q, statusFilter, keyLike, page, pageSize));
+  redirect(buildListHref(q, keyLike, page, pageSize));
 }
 
 async function deleteAgent(formData: FormData) {
@@ -162,7 +262,6 @@ async function deleteAgent(formData: FormData) {
   const idRaw = String(formData.get("id") ?? "").trim();
   const id = Number(idRaw);
   const q = String(formData.get("q") ?? "").trim();
-  const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
   const page = parsePage(String(formData.get("page") ?? "1"));
   const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
@@ -171,7 +270,7 @@ async function deleteAgent(formData: FormData) {
   await softDeleteAgentById(id, user.id);
   revalidatePath("/agents");
   revalidatePath("/experiments");
-  redirect(buildListHref(q, status, keyLike, page, pageSize));
+  redirect(buildListHref(q, keyLike, page, pageSize));
 }
 
 async function softDeleteAgentById(id: number, userId: string) {
@@ -181,7 +280,6 @@ async function softDeleteAgentById(id: number, userId: string) {
          deleted_at = CURRENT_TIMESTAMP,
          updated_by = $2,
          updated_at = CURRENT_TIMESTAMP,
-         status = 'archived',
          version = CONCAT(version, '__deleted__', id)
      WHERE id = $1 AND deleted_at IS NULL`,
     [id, userId]
@@ -203,7 +301,6 @@ async function bulkDeleteAgent(formData: FormData) {
 
   const ids = parseSelectedIds(formData);
   const q = String(formData.get("q") ?? "").trim();
-  const status = String(formData.get("statusFilter") ?? "all").trim() || "all";
   const keyLike = String(formData.get("keyLike") ?? "").trim();
   const page = parsePage(String(formData.get("page") ?? "1"));
   const pageSize = parsePageSize(String(formData.get("pageSize") ?? "10"));
@@ -214,18 +311,21 @@ async function bulkDeleteAgent(formData: FormData) {
   }
   revalidatePath("/agents");
   revalidatePath("/experiments");
-  redirect(buildListHref(q, status, keyLike, page, pageSize));
+  redirect(buildListHref(q, keyLike, page, pageSize));
 }
 
 export default async function AgentsPage({
   searchParams
 }: {
-  searchParams: Promise<{ q?: string; status?: string; keyLike?: string; panel?: string; id?: string; error?: string; page?: string; pageSize?: string }>;
+  searchParams: Promise<{ q?: string; keyLike?: string; panel?: string; id?: string; error?: string; page?: string; pageSize?: string }>;
 }) {
   await requireUser();
+  const runtimeCommandVars = await getTemplateVariableGroup("agent_runtime_commands");
+  const runtimeCommandMacroList = formatTemplateVariableList(runtimeCommandVars.variables);
+  const runtimeCommandDetailLines = formatTemplateVariableDetailLines(runtimeCommandVars.variables);
 
-  const { q = "", status = "all", keyLike = "", panel = "none", id = "", error = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
-  const filters = { q: q.trim(), status: status.trim() || "all", keyLike: keyLike.trim() };
+  const { q = "", keyLike = "", panel = "none", id = "", error = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
+  const filters = { q: q.trim(), keyLike: keyLike.trim() };
   const pageSize = parsePageSize(pageSizeRaw);
   const requestedPage = parsePage(pageRaw);
   const creating = panel === "create";
@@ -233,15 +333,14 @@ export default async function AgentsPage({
   const parsedId = id.trim() ? Number(id.trim()) : 0;
   const editingId = Number.isInteger(parsedId) && parsedId > 0 ? parsedId : 0;
 
-  const filterParams = [filters.q, filters.q, filters.q, filters.q, filters.keyLike, filters.keyLike, filters.status, filters.status];
+  const filterParams = [filters.q, filters.q, filters.q, filters.q, filters.keyLike, filters.keyLike];
   const [countResult, editing] = await Promise.all([
     dbQuery<{ total_count: number | string }>(
       `SELECT COUNT(*) AS total_count
        FROM agents
        WHERE ($1 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(version) LIKE CONCAT('%', LOWER($4), '%'))
          AND deleted_at IS NULL
-         AND ($5 = '' OR LOWER(agent_key) LIKE CONCAT('%', LOWER($6), '%'))
-         AND ($7 = 'all' OR status = $8)`,
+         AND ($5 = '' OR LOWER(agent_key) LIKE CONCAT('%', LOWER($6), '%'))`,
       filterParams
     ),
     editingId
@@ -252,16 +351,15 @@ export default async function AgentsPage({
           name: string;
           description: string;
           runtime_spec_json: RuntimeSpec | null;
-          status: string;
           updated_at: string;
         }>(
-          `SELECT id, agent_key, version, name, description, runtime_spec_json, status, updated_at
+          `SELECT id, agent_key, version, name, description, runtime_spec_json, updated_at
            FROM agents
            WHERE id = $1 AND deleted_at IS NULL
            LIMIT 1`,
           [editingId]
         )
-      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; agent_key: string; version: string; name: string; description: string; runtime_spec_json: RuntimeSpec | null; status: string; updated_at: string }>; rowCount: number })
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; agent_key: string; version: string; name: string; description: string; runtime_spec_json: RuntimeSpec | null; updated_at: string }>; rowCount: number })
   ]);
   const total = Number(countResult.rows[0]?.total_count ?? 0);
   const page = clampPage(requestedPage, total, pageSize);
@@ -273,28 +371,27 @@ export default async function AgentsPage({
     name: string;
     description: string;
     runtime_spec_json: RuntimeSpec | null;
-    status: string;
     updated_at: string;
   }>(
-    `SELECT id, agent_key, version, name, description, runtime_spec_json, status, updated_at
+    `SELECT id, agent_key, version, name, description, runtime_spec_json, updated_at
      FROM agents
      WHERE ($1 = '' OR LOWER(name) LIKE CONCAT('%', LOWER($2), '%') OR LOWER(agent_key) LIKE CONCAT('%', LOWER($3), '%') OR LOWER(version) LIKE CONCAT('%', LOWER($4), '%'))
        AND deleted_at IS NULL
        AND ($5 = '' OR LOWER(agent_key) LIKE CONCAT('%', LOWER($6), '%'))
-       AND ($7 = 'all' OR status = $8)
      ORDER BY updated_at DESC
-     LIMIT $9 OFFSET $10`,
+     LIMIT $7 OFFSET $8`,
     [...filterParams, pageSize, offset]
   );
   const rows = rowsResult.rows;
 
-  const listHref = buildListHref(filters.q, filters.status, filters.keyLike, page, pageSize);
+  const listHref = buildListHref(filters.q, filters.keyLike, page, pageSize);
   const createHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=create`;
   const filterHref = `${listHref}${listHref.includes("?") ? "&" : "?"}panel=filter`;
-  const hasFilter = filters.status !== "all" || !!filters.keyLike;
+  const hasFilter = !!filters.keyLike;
   const editingRow = editing.rowCount > 0 ? editing.rows[0] : undefined;
-  const paginationQuery = { q: filters.q, status: filters.status === "all" ? "" : filters.status, keyLike: filters.keyLike };
-  const resetHref = buildListHref(filters.q, "all", "", 1, pageSize);
+  const runtimeSplit = splitRuntimeSpec(editingRow?.runtime_spec_json ?? null);
+  const paginationQuery = { q: filters.q, keyLike: filters.keyLike };
+  const resetHref = buildListHref(filters.q, "", 1, pageSize);
   const showDrawer = creating || Boolean(editingRow);
   const bulkDeleteFormId = "agent-bulk-delete-form";
 
@@ -307,7 +404,6 @@ export default async function AgentsPage({
 
       <section className="toolbar-row">
         <form action="/agents" className="search-form">
-          <input type="hidden" name="status" value={filters.status} />
           <input type="hidden" name="keyLike" value={filters.keyLike} />
           <input type="hidden" name="pageSize" value={pageSize} />
           <label className="input-icon-wrap">
@@ -331,7 +427,6 @@ export default async function AgentsPage({
       {hasFilter ? (
         <section className="active-filters">
           <span className="muted">当前筛选:</span>
-          {filters.status !== "all" ? <span className="filter-pill">{`状态: ${filters.status}`}</span> : null}
           {filters.keyLike ? <span className="filter-pill">{`Agent Key: ${filters.keyLike}`}</span> : null}
           <Link href={resetHref} className="text-btn">
             清空筛选
@@ -356,7 +451,6 @@ export default async function AgentsPage({
         </div>
         <form id={bulkDeleteFormId} action={bulkDeleteAgent}>
           <input type="hidden" name="q" value={filters.q} />
-          <input type="hidden" name="statusFilter" value={filters.status} />
           <input type="hidden" name="keyLike" value={filters.keyLike} />
           <input type="hidden" name="page" value={page} />
           <input type="hidden" name="pageSize" value={pageSize} />
@@ -370,7 +464,6 @@ export default async function AgentsPage({
               <th>Key</th>
               <th>Version</th>
               <th>Docker Image</th>
-              <th>Status</th>
               <th>更新时间</th>
               <th>操作</th>
             </tr>
@@ -394,9 +487,6 @@ export default async function AgentsPage({
                 <td className="agent-docker-cell">
                   <code>{runtime.agent_image ?? "-"}</code>
                 </td>
-                <td>
-                  <span className={`status-pill ${row.status}`}>{row.status}</span>
-                </td>
                 <td>{formatDateTime(row.updated_at)}</td>
                 <td>
                   <div className="row-actions">
@@ -413,7 +503,6 @@ export default async function AgentsPage({
                     <form action={deleteAgent}>
                       <input type="hidden" name="id" value={row.id} />
                       <input type="hidden" name="q" value={filters.q} />
-                      <input type="hidden" name="statusFilter" value={filters.status} />
                       <input type="hidden" name="keyLike" value={filters.keyLike} />
                       <input type="hidden" name="page" value={page} />
                       <input type="hidden" name="pageSize" value={pageSize} />
@@ -447,19 +536,6 @@ export default async function AgentsPage({
                 <input type="hidden" name="q" value={filters.q} />
                 <input type="hidden" name="panel" value="none" />
                 <input type="hidden" name="pageSize" value={pageSize} />
-                <label className="field-label">状态</label>
-                <div className="chip-row">
-                  {[
-                    { value: "all", label: "全部" },
-                    { value: "active", label: "active" },
-                    { value: "archived", label: "archived" }
-                  ].map((item) => (
-                    <label key={item.value} className="chip">
-                      <input type="radio" name="status" value={item.value} defaultChecked={filters.status === item.value} />
-                      {item.label}
-                    </label>
-                  ))}
-                </div>
                 <label className="field-label">Agent Key 包含</label>
                 <input name="keyLike" placeholder="例如 openclaw" defaultValue={filters.keyLike} />
                 <SubmitButton pendingText="应用中...">应用筛选</SubmitButton>
@@ -490,7 +566,6 @@ export default async function AgentsPage({
               >
                 {editingRow ? <input type="hidden" name="id" value={editingRow.id} /> : null}
                 <input type="hidden" name="q" value={filters.q} />
-                <input type="hidden" name="statusFilter" value={filters.status} />
                 <input type="hidden" name="keyLike" value={filters.keyLike} />
                 <input type="hidden" name="page" value={page} />
                 <input type="hidden" name="pageSize" value={pageSize} />
@@ -521,21 +596,6 @@ export default async function AgentsPage({
 
                 <div className="field-group">
                   <label className="field-head">
-                    <span className="field-title">Status</span>
-                    <span className="type-pill">Enum</span>
-                  </label>
-                  <div className="chip-row">
-                    {["active", "archived"].map((item) => (
-                      <label key={item} className="chip">
-                        <input type="radio" name="status" value={item} defaultChecked={(editingRow?.status ?? "active") === item} />
-                        {item}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="field-group">
-                  <label className="field-head">
                     <span className="field-title">Description</span>
                     <span className="type-pill">Optional</span>
                   </label>
@@ -544,19 +604,116 @@ export default async function AgentsPage({
 
                 <div className="field-group">
                   <label className="field-head">
-                    <span className="field-title required">Runtime Spec (JSON)</span>
+                    <span className="field-title required">agent_image</span>
+                    <span className="type-pill">String</span>
+                  </label>
+                  <input
+                    name="agentImage"
+                    placeholder="例如 ghcr.io/example/agno-agent@sha256:replace-me"
+                    required
+                    defaultValue={runtimeSplit.core.agentImage}
+                  />
+                </div>
+
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title field-title-with-help">
+                      sandbox_start_command
+                      <span className="field-help-icon" aria-label="可用模板变量" role="img" tabIndex={0}>
+                        !
+                        <span className="field-help-tooltip">
+                          <strong>可用模板变量</strong>
+                          <br />
+                          {runtimeCommandDetailLines.map((line) => (
+                            <span key={`sandbox-${line}`}>
+                              {line}
+                              <br />
+                            </span>
+                          ))}
+                        </span>
+                      </span>
+                    </span>
+                    <span className="type-pill">Command</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="sandboxStartCommand"
+                    placeholder="容器启动命令（可选）"
+                    accept=".txt,.sh"
+                    hint={`可用变量：${runtimeCommandMacroList}`}
+                    defaultValue={runtimeSplit.core.sandboxStartCommand}
+                  />
+                </div>
+
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title required field-title-with-help">
+                      case_exec_command
+                      <span className="field-help-icon" aria-label="可用模板变量" role="img" tabIndex={0}>
+                        !
+                        <span className="field-help-tooltip">
+                          <strong>可用模板变量</strong>
+                          <br />
+                          {runtimeCommandDetailLines.map((line) => (
+                            <span key={`case-${line}`}>
+                              {line}
+                              <br />
+                            </span>
+                          ))}
+                        </span>
+                      </span>
+                    </span>
+                    <span className="type-pill">Command</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="caseExecCommand"
+                    placeholder="Run Case 执行命令"
+                    required
+                    accept=".txt,.sh"
+                    hint={`可用变量：${runtimeCommandMacroList}`}
+                    defaultValue={runtimeSplit.core.caseExecCommand}
+                  />
+                </div>
+
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title field-title-with-help">
+                      after_exec_command
+                      <span className="field-help-icon" aria-label="可用模板变量" role="img" tabIndex={0}>
+                        !
+                        <span className="field-help-tooltip">
+                          <strong>可用模板变量</strong>
+                          <br />
+                          {runtimeCommandDetailLines.map((line) => (
+                            <span key={`after-${line}`}>
+                              {line}
+                              <br />
+                            </span>
+                          ))}
+                        </span>
+                      </span>
+                    </span>
+                    <span className="type-pill">Command</span>
+                  </label>
+                  <TextareaWithFileUpload
+                    name="afterExecCommand"
+                    placeholder="Case 成功后的后置命令（可选）"
+                    accept=".txt,.sh"
+                    hint={`可用变量：${runtimeCommandMacroList}`}
+                    defaultValue={runtimeSplit.core.afterExecCommand}
+                  />
+                </div>
+
+                <div className="field-group">
+                  <label className="field-head">
+                    <span className="field-title">Additional Runtime Spec (JSON)</span>
                     <span className="type-pill">JSON</span>
                   </label>
                   <TextareaWithFileUpload
-                    name="runtimeSpec"
+                    name="additionalRuntimeSpec"
                     required
                     accept=".json,.yaml,.yml,.txt"
-                    hint="统一运行配置（runtime_type / agent_image / sandbox / services / scorers）"
-                    defaultValue={
-                      editingRow?.runtime_spec_json
-                        ? JSON.stringify(editingRow.runtime_spec_json, null, 2)
-                        : JSON.stringify(defaultRuntimeSpec, null, 2)
-                    }
+                    hint="除 agent_image/sandbox_start_command/case_exec_command/after_exec_command 外的全部 runtime 配置"
+                    defaultValue={JSON.stringify(runtimeSplit.additional, null, 2)}
                   />
                 </div>
 
@@ -573,7 +730,6 @@ export default async function AgentsPage({
                   <form action={deleteAgent} className="drawer-inline-form">
                     <input type="hidden" name="id" value={editingRow.id} />
                     <input type="hidden" name="q" value={filters.q} />
-                    <input type="hidden" name="statusFilter" value={filters.status} />
                     <input type="hidden" name="keyLike" value={filters.keyLike} />
                     <input type="hidden" name="page" value={page} />
                     <input type="hidden" name="pageSize" value={pageSize} />

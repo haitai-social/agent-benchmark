@@ -15,13 +15,11 @@ type ExperimentContext = {
 type RunCaseInput = {
   id: number;
   user_input: string;
-  reference_trajectory: unknown;
   reference_output: unknown;
 };
 
 type DataItemForRun = RunCaseInput & {
   session_jsonl: string;
-  trace_id: string | null;
 };
 
 type ExperimentDispatchReady = {
@@ -49,8 +47,6 @@ type ExperimentDispatchReady = {
     attempt_no: number;
     session_jsonl: string;
     user_input: string;
-    trace_id: string | null;
-    reference_trajectory: unknown;
     reference_output: unknown;
   }>;
   newRunCaseIds: number[];
@@ -214,7 +210,7 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
     }
 
     const items = await tx.query<DataItemForRun>(
-      `SELECT id, session_jsonl, user_input, trace_id, reference_trajectory, reference_output
+      `SELECT id, session_jsonl, user_input, reference_output
        FROM data_items
        WHERE dataset_id = $1 AND deleted_at IS NULL
        ORDER BY created_at ASC`,
@@ -242,8 +238,6 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
       attempt_no: number;
       session_jsonl: string;
       user_input: string;
-      trace_id: string | null;
-      reference_trajectory: unknown;
       reference_output: unknown;
     }> = [];
     const newRunCaseIds: number[] = [];
@@ -289,8 +283,6 @@ export async function runExperiment(experimentId: number, _triggeredBy: string) 
         attempt_no: nextAttempt,
         session_jsonl: item.session_jsonl,
         user_input: item.user_input,
-        trace_id: item.trace_id,
-        reference_trajectory: item.reference_trajectory,
         reference_output: item.reference_output
       });
     }
@@ -433,11 +425,9 @@ export async function retryFailedRunCases(experimentId: number, _triggeredBy: st
       attempt_no: number;
       session_jsonl: string;
       user_input: string;
-      trace_id: string | null;
-      reference_trajectory: unknown;
       reference_output: unknown;
     }>(
-      `SELECT rc.id AS run_case_id, rc.data_item_id, rc.attempt_no, di.session_jsonl, di.user_input, di.trace_id, di.reference_trajectory, di.reference_output
+      `SELECT rc.id AS run_case_id, rc.data_item_id, rc.attempt_no, di.session_jsonl, di.user_input, di.reference_output
        FROM run_cases rc
        JOIN data_items di ON di.id = rc.data_item_id
        WHERE rc.experiment_id = $1
@@ -476,8 +466,6 @@ export async function retryFailedRunCases(experimentId: number, _triggeredBy: st
       attempt_no: number;
       session_jsonl: string;
       user_input: string;
-      trace_id: string | null;
-      reference_trajectory: unknown;
       reference_output: unknown;
     }> = [];
     const replacedPairs: Array<{ oldRunCaseId: number; newRunCaseId: number }> = [];
@@ -503,8 +491,6 @@ export async function retryFailedRunCases(experimentId: number, _triggeredBy: st
         attempt_no: nextAttempt,
         session_jsonl: row.session_jsonl,
         user_input: row.user_input,
-        trace_id: row.trace_id,
-        reference_trajectory: row.reference_trajectory,
         reference_output: row.reference_output
       });
     }

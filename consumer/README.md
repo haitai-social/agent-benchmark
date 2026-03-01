@@ -149,24 +149,47 @@ CONSUMER_DOCKER_PULL_POLICY=if-not-present
 
 ```bash
 cd consumer
-PYTHONPATH=src .venv/bin/python tests/smoke/smoke_docker_run.py
+PYTHONPATH=src .venv/bin/python tests/smoke_docker_run.py
 ```
 
 2. RabbitMQ 接收链路（实际 `rabbitmq receive`）
 
 ```bash
 cd consumer
-PYTHONPATH=src .venv/bin/python tests/smoke/smoke_rabbitmq_receive.py
+PYTHONPATH=src .venv/bin/python tests/smoke_rabbitmq_receive.py
 ```
 
 ## Acceptance 验收（一键）
 
 ```bash
 cd consumer
-./scripts/e2e_experiments.sh
+./scripts/e2e_experiments_mock.sh
 ```
 
 说明：当前 acceptance 为 `direct_runner` 模式，会直接构造 `experiment.run.requested` 消息并在本进程执行 runner，避免复用线上 RabbitMQ 队列导致的消息堆积干扰。
+
+## 一对一测试脚本（tests/e2e）
+
+一对一脚本统一在 `tests/e2e/`，当前入口为：
+- `tests/e2e/test_consume_a_mock_message.py`
+
+对应运行脚本：
+
+1. Mock Agent（默认）
+
+```bash
+cd consumer
+./scripts/e2e_experiments_mock.sh
+```
+
+2. OpenClaw Agent
+
+```bash
+cd consumer
+ACCEPTANCE_AGENT_KEY=openclaw-otel-cli \
+ACCEPTANCE_AGENT_VERSION=2026.2.26-otel-v1 \
+./scripts/e2e_experiments_openclaw.sh
+```
 
 ## 测试
 

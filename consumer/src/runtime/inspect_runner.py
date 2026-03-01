@@ -15,11 +15,15 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.otel_mapper import map_logs_to_trajectory, map_spans_to_trajectory
 from domain.contracts import CaseExecutionResult, ExperimentRunRequested, RunCaseInput
 from infrastructure.config import Settings
 from infrastructure.docker_runner import DockerRunner
 from infrastructure.mock_gateway.runtime import start_mock_gateway
+from infrastructure.trace_repository import TraceRepository
 from runtime.evaluator_client import EvaluatorCallInput, call_evaluator
+from runtime.evaluator_client import EvaluatorDataItem, EvaluatorRun
+from runtime.runtime_command_template import render_runtime_command_template
 
 logger = logging.getLogger(__name__)
 DEFAULT_SCORE_SENTINEL = -1.0
@@ -42,6 +46,7 @@ class InspectRunner:
     def __init__(self, docker_runner: DockerRunner, settings: Settings) -> None:
         self.docker_runner = docker_runner
         self.settings = settings
+        self.trace_repo = TraceRepository.from_settings(settings)
         self._scorer_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, int(settings.scorer_concurrent_cases)),
             thread_name_prefix="scorer",
@@ -196,10 +201,10 @@ class InspectRunner:
         image = str(runtime_spec.get("agent_image") or "").strip()
         if not image:
             raise RuntimeError("E_RUNTIME_SPEC_IMAGE_REQUIRED: agent.runtime_spec_json.agent_image")
-        case_exec_command = str(runtime_spec.get("case_exec_command") or "").strip()
-        if not case_exec_command:
+        case_exec_command_template = str(runtime_spec.get("case_exec_command") or "").strip()
+        if not case_exec_command_template:
             raise RuntimeError("E_RUNTIME_SPEC_CASE_EXEC_REQUIRED: agent.runtime_spec_json.case_exec_command")
-        after_exec_command = str(runtime_spec.get("after_exec_command") or "").strip()
+        after_exec_command_template = str(runtime_spec.get("after_exec_command") or "").strip()
 
         case_map = {rc.run_case_id: rc for rc in run_cases}
         execution: dict[int, dict[str, Any]] = {
@@ -215,6 +220,7 @@ class InspectRunner:
                 "latency_ms": 0,
                 "sandbox_connect_ms": 0,
                 "case_exec_ms": 0,
+                "otel_query_ms": 0,
                 "scorer_total_ms": 0,
                 "scorer_timings_ms": {},
             }
@@ -285,6 +291,18 @@ class InspectRunner:
                     execution[run_case_id]["container_name"] = conn.container or ""
                     execution[run_case_id]["sandbox_connect_ms"] = sandbox_connect_ms
                     case_env = self._build_case_env(message, run_case, mock_base_url)
+                    case_exec_command = render_runtime_command_template(
+                        template=case_exec_command_template,
+                        message=message,
+                        run_case=run_case,
+                        mock_base_url=mock_base_url,
+                    )
+                    after_exec_command = render_runtime_command_template(
+                        template=after_exec_command_template,
+                        message=message,
+                        run_case=run_case,
+                        mock_base_url=mock_base_url,
+                    )
                     _update_progress("case_exec", run_case_id)
                     case_exec_started = time.time()
                     exec_result, raw_logs = await self._exec_case_with_startup_retry(
@@ -310,7 +328,11 @@ class InspectRunner:
                     if after_exec_logs:
                         combined_logs = f"{combined_logs}\n\n[after-exec]\n{after_exec_logs}".strip()
                     parsed = self._parse_agent_output(raw_logs)
-                    output, trajectory = self._normalize_case_result_payload(parsed, exec_result.stdout)
+                    output, _ = self._normalize_case_result_payload(parsed, exec_result.stdout)
+                    _update_progress("otel_query", run_case_id)
+                    otel_query_started = time.time()
+                    trajectory = self._collect_trajectory_from_otel(run_case_id=run_case_id)
+                    execution[run_case_id]["otel_query_ms"] = int((time.time() - otel_query_started) * 1000)
                     logs = str(parsed.get("logs")) if parsed and parsed.get("logs") else combined_logs
                     if container_logs:
                         logs = f"{logs}\n\n[container]\n{container_logs}".strip()
@@ -375,6 +397,8 @@ class InspectRunner:
                         status=str(execution[run_case_id].get("status") or "failed"),
                         trajectory=execution[run_case_id].get("trajectory"),
                         output=execution[run_case_id].get("output"),
+                        logs=str(execution[run_case_id].get("logs") or ""),
+                        latency_ms=int(execution[run_case_id].get("latency_ms") or 0),
                     )
                     await score_semaphore.acquire()
                     _update_progress("score_exec", run_case_id)
@@ -452,29 +476,40 @@ class InspectRunner:
             prestarted_sidecars[rc.run_case_id] = sidecar
             execution[rc.run_case_id]["mock_sidecar_endpoint"] = sidecar.endpoint if sidecar else ""
 
-        samples = [
-            Sample(
-                id=rc.run_case_id,
-                input=rc.user_input,
-                target=json.dumps(rc.reference_output, ensure_ascii=False),
-                metadata={
-                    "run_case_id": str(rc.run_case_id),
-                    "sandbox_group_key": f"case-{rc.run_case_id}",
-                    "trace_id": rc.trace_id or "",
-                    "session_jsonl": rc.session_jsonl,
-                    "runtime_spec_json": json.dumps(runtime_spec, ensure_ascii=False),
-                    "case_env_json": json.dumps(
-                        self._build_case_env(
-                            message,
-                            rc,
-                            str(execution[rc.run_case_id].get("mock_sidecar_endpoint") or "") or None,
+        samples = []
+        for rc in run_cases:
+            mock_base_url = str(execution[rc.run_case_id].get("mock_sidecar_endpoint") or "") or None
+            runtime_spec_for_case = dict(runtime_spec)
+            sandbox_start_command_template = str(runtime_spec_for_case.get("sandbox_start_command") or "").strip()
+            if sandbox_start_command_template:
+                runtime_spec_for_case["sandbox_start_command"] = render_runtime_command_template(
+                    template=sandbox_start_command_template,
+                    message=message,
+                    run_case=rc,
+                    mock_base_url=mock_base_url,
+                )
+            samples.append(
+                Sample(
+                    id=rc.run_case_id,
+                    input=rc.user_input,
+                    target=json.dumps(rc.reference_output, ensure_ascii=False),
+                    metadata={
+                        "run_case_id": str(rc.run_case_id),
+                        "sandbox_group_key": f"case-{rc.run_case_id}",
+                        "trace_id": rc.trace_id or "",
+                        "session_jsonl": rc.session_jsonl,
+                        "runtime_spec_json": json.dumps(runtime_spec_for_case, ensure_ascii=False),
+                        "case_env_json": json.dumps(
+                            self._build_case_env(
+                                message,
+                                rc,
+                                mock_base_url,
+                            ),
+                            ensure_ascii=False,
                         ),
-                        ensure_ascii=False,
-                    ),
-                },
+                    },
+                )
             )
-            for rc in run_cases
-        ]
 
         task = Task(
             dataset=samples,
@@ -577,6 +612,7 @@ class InspectRunner:
                 "sandbox_connect": int(rec.get("sandbox_connect_ms") or 0),
                 "case_exec": int(rec.get("case_exec_ms") or 0),
                 "scorer_total": int(rec.get("scorer_total_ms") or 0),
+                "otel_query": int(rec.get("otel_query_ms") or 0),
                 "total": int(rec.get("latency_ms") or 0),
                 "scorer_breakdown": rec.get("scorer_timings_ms") or {},
             }
@@ -643,49 +679,9 @@ class InspectRunner:
         run_case: RunCaseInput,
         mock_base_url: str | None,
     ) -> dict[str, str]:
-        runtime_spec = dict(message.agent.runtime_spec_json or {})
-        env_from_spec = runtime_spec.get("agent_env_template", {})
-        env: dict[str, str] = {
-            "BENCHMARK_EXPERIMENT_ID": str(message.experiment.id),
-            "BENCHMARK_DATASET_ID": str(message.dataset.id),
-            "BENCHMARK_RUN_CASE_ID": str(run_case.run_case_id),
-            "BENCHMARK_DATA_ITEM_ID": str(run_case.data_item_id),
-            "BENCHMARK_ATTEMPT_NO": str(run_case.attempt_no),
-            "BENCHMARK_USER_INPUT": run_case.user_input,
-            "BENCHMARK_SESSION_JSONL": run_case.session_jsonl,
-            "BENCHMARK_AGENT_RUNTIME_SPEC": json.dumps(message.agent.runtime_spec_json),
-            "BENCHMARK_MOCK_CONFIG": json.dumps(run_case.mock_config, default=lambda o: o.__dict__),
-        }
-        if isinstance(env_from_spec, dict):
-            for key, value in env_from_spec.items():
-                if isinstance(key, str):
-                    env[key] = str(value)
-        if run_case.trace_id:
-            env["BENCHMARK_TRACE_ID"] = run_case.trace_id
-        existing_resource_attrs = str(env.get("OTEL_RESOURCE_ATTRIBUTES") or "").strip()
-        injected_resource_attrs = ",".join(
-            [
-                f"benchmark.experiment_id={message.experiment.id}",
-                f"benchmark.run_case_id={run_case.run_case_id}",
-                f"benchmark.data_item_id={run_case.data_item_id}",
-            ]
-        )
-        env["OTEL_RESOURCE_ATTRIBUTES"] = (
-            f"{existing_resource_attrs},{injected_resource_attrs}"
-            if existing_resource_attrs
-            else injected_resource_attrs
-        )
-        existing_headers = str(env.get("OTEL_EXPORTER_OTLP_HEADERS") or "").strip()
-        injected_headers = ",".join(
-            [
-                f"x-benchmark-experiment-id={message.experiment.id}",
-                f"x-benchmark-run-case-id={run_case.run_case_id}",
-                f"x-benchmark-data-item-id={run_case.data_item_id}",
-            ]
-        )
-        merged_headers = f"{existing_headers},{injected_headers}" if existing_headers else injected_headers
-        env["OTEL_EXPORTER_OTLP_HEADERS"] = merged_headers
-        env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = merged_headers
+        del message
+        del run_case
+        env: dict[str, str] = {}
         if mock_base_url:
             env.update(self._build_mock_proxy_env(mock_base_url))
         return env
@@ -863,10 +859,21 @@ class InspectRunner:
                         model_name=model_name,
                         prompt_template=prompt_template,
                         payload=EvaluatorCallInput(
-                            user_input=run_case.user_input,
-                            trajectory=result.trajectory,
-                            agent_output=result.output,
-                            reference_output=run_case.reference_output,
+                            data_item=EvaluatorDataItem(
+                                id=run_case.data_item_id,
+                                input=run_case.user_input,
+                                session=run_case.session_jsonl,
+                                trajectory=run_case.reference_trajectory,
+                                output=run_case.reference_output,
+                                trace_id=run_case.trace_id,
+                            ),
+                            run=EvaluatorRun(
+                                output=result.output,
+                                trajectory=result.trajectory,
+                                status=result.status,
+                                logs=result.logs,
+                                latency_ms=result.latency_ms,
+                            ),
                             tools={},
                         ),
                         timeout_seconds=timeout_seconds,
@@ -880,6 +887,30 @@ class InspectRunner:
                     logger.warning("code=E_EVALUATOR_CALL_FAILED scorer=%s err=%s", scorer_key, exc)
                     return DEFAULT_SCORE_SENTINEL, f"E_SCORE_DEFAULT_EVALUATOR_CALL_FAILED: {type(exc).__name__}", {"source": "default"}
         return DEFAULT_SCORE_SENTINEL, "E_SCORE_DEFAULT_EVALUATOR_CONFIG_MISSING", {"source": "default"}
+
+    def _collect_trajectory_from_otel(self, *, run_case_id: int) -> list[dict[str, Any]]:
+        now_ms = int(time.time() * 1000)
+        try:
+            logs = self.trace_repo.fetch_logs_by_run_case(
+                run_case_id=run_case_id,
+                start_ms=now_ms - 15 * 60 * 1000,
+                end_ms=now_ms + 60 * 1000,
+                limit=4000,
+            )
+            mapped_logs = map_logs_to_trajectory(logs)
+            if mapped_logs:
+                return mapped_logs
+
+            spans = self.trace_repo.fetch_spans_by_run_case(
+                run_case_id=run_case_id,
+                start_ms=now_ms - 15 * 60 * 1000,
+                end_ms=now_ms + 60 * 1000,
+                limit=2000,
+            )
+            return map_spans_to_trajectory(spans)
+        except Exception as exc:
+            logger.warning("code=E_OTEL_QUERY_FAILED run_case_id=%s err=%s", run_case_id, exc)
+            return []
 
     def _as_int(self, preferred: Any, default: int) -> int:
         if preferred is not None and str(preferred).strip() != "":

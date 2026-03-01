@@ -7,6 +7,12 @@ import { BulkSelectionControls } from "@/app/components/bulk-selection-controls"
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
 import { parseSelectedIds } from "@/lib/form-ids";
 import { requireUser } from "@/lib/supabase-auth";
+import {
+  formatTemplateVariableDetailLines,
+  formatTemplateVariableList,
+  formatTemplateVariableMacro,
+  getTemplateVariableGroup,
+} from "@/lib/template-vars";
 import { FilterIcon, JudgeIcon, PlusIcon, SearchIcon } from "../components/icons";
 import { ExpandableTextCell } from "../components/expandable-text-cell";
 import { SubmitButton } from "../components/submit-button";
@@ -145,6 +151,11 @@ export default async function EvaluatorsPage({
   searchParams: Promise<{ q?: string; panel?: string; id?: string; provider?: string; model?: string; page?: string; pageSize?: string }>;
 }) {
   await requireUser();
+  const evaluatorPromptVars = await getTemplateVariableGroup("evaluator_prompt");
+  const evaluatorPromptMacroList = formatTemplateVariableList(evaluatorPromptVars.variables);
+  const evaluatorPromptDetailLines = formatTemplateVariableDetailLines(evaluatorPromptVars.variables);
+  const exampleRunTrajectory = formatTemplateVariableMacro("run.trajectory");
+  const exampleDataInput = formatTemplateVariableMacro("data_item.input");
 
   const { q = "", panel = "none", id = "", provider = "all", model = "", page: pageRaw, pageSize: pageSizeRaw } = await searchParams;
   const filters = { q: q.trim(), provider: provider.trim() || "all", model: model.trim() };
@@ -488,14 +499,30 @@ export default async function EvaluatorsPage({
                 </div>
                 <div className="field-group">
                   <label className="field-head">
-                    <span className="field-title required">Prompt Template</span>
+                    <span className="field-title required field-title-with-help">
+                      Prompt Template
+                      <span className="field-help-icon" aria-label="可用模板变量" role="img" tabIndex={0}>
+                        !
+                        <span className="field-help-tooltip">
+                          <strong>可用模板变量</strong>
+                          <br />
+                          {evaluatorPromptDetailLines.map((line) => (
+                            <span key={line}>
+                              {line}
+                              <br />
+                            </span>
+                          ))}
+                        </span>
+                      </span>
+                    </span>
                     <span className="type-pill">Text</span>
                   </label>
                   <TextareaWithFileUpload
                     name="promptTemplate"
-                    placeholder="评估 Prompt 模板"
+                    placeholder={`使用模板变量，例如 ${exampleRunTrajectory}、${exampleDataInput}`}
                     required
                     accept=".txt,.md,.json"
+                    hint={`可用变量：${evaluatorPromptMacroList}`}
                     defaultValue={editingRow?.prompt_template ?? ""}
                   />
                 </div>

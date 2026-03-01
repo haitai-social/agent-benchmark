@@ -40,6 +40,9 @@ class _NoopLock:
         del suffix
 
 
+# Mapping note for OpenClaw E2E:
+# `openclaw-otel-cli` should use image `ghcr.io/haitai-social/agent-benchmark:openclaw-otel-demo`,
+# which is built from `tests/openclaw-otel-demo/Dockerfile`.
 MOCK_AGENT_KEY = os.getenv("ACCEPTANCE_AGENT_KEY", "mock-output-and-otel")
 MOCK_AGENT_VERSION = os.getenv("ACCEPTANCE_AGENT_VERSION", "v1")
 MOCK_AGENT_NAME = os.getenv("ACCEPTANCE_AGENT_NAME", "")
@@ -64,7 +67,7 @@ def _load_test_options() -> E2EOptions:
 
 
 @pytest.mark.e2e
-def test_mock_output_and_otel_trajectory_has_events() -> None:
+def test_consume_a_mock_message_trajectory_has_events() -> None:
     try:
         settings = load_settings()
     except ValueError as exc:
@@ -93,6 +96,9 @@ def test_mock_output_and_otel_trajectory_has_events() -> None:
     )
     assert _run_case_has_otel_logs(settings=settings, run_case_id=int(run_case["id"])), (
         f"otel_logs missing for run_case_id={run_case['id']}"
+    )
+    assert _experiment_has_duration(settings=settings, experiment_id=experiment_id), (
+        f"experiment duration is missing for experiment_id={experiment_id}"
     )
 
 
@@ -178,7 +184,7 @@ def _create_dispatch_with_mock_agent(*, settings: Settings, options: E2EOptions)
             if isinstance(runtime_spec, str):
                 runtime_spec = json.loads(runtime_spec)
             if not isinstance(runtime_spec, dict):
-                raise RuntimeError("mock-output-and-otel agent runtime_spec_json is invalid")
+                raise RuntimeError("selected agent runtime_spec_json is invalid")
 
             cur.execute("SELECT id, name FROM datasets WHERE deleted_at IS NULL ORDER BY id ASC LIMIT 1")
             dataset = _require_row("dataset", cur.fetchone())
@@ -433,6 +439,39 @@ def _poll_run_case(*, settings: Settings, experiment_id: int, timeout_seconds: i
         conn.close()
 
     raise TimeoutError(f"run_case did not finish in {timeout_seconds}s, experiment_id={experiment_id}")
+
+
+def _experiment_has_duration(*, settings: Settings, experiment_id: int) -> bool:
+    mysql_server = settings.mysql_server
+    mysql_user = settings.mysql_user
+    mysql_db = settings.mysql_db
+    if not mysql_server or not mysql_user or not mysql_db:
+        raise RuntimeError("missing mysql settings")
+
+    conn = pymysql.connect(
+        host=mysql_server,
+        port=settings.mysql_port,
+        user=mysql_user,
+        password=(settings.mysql_password or "").strip('"'),
+        database=mysql_db,
+        autocommit=True,
+        cursorclass=_dict_cursor_class(),
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT started_at, finished_at
+                FROM experiments
+                WHERE id = %s
+                LIMIT 1
+                """,
+                (int(experiment_id),),
+            )
+            row = _require_row("experiment", cur.fetchone())
+            return row.get("started_at") is not None and row.get("finished_at") is not None
+    finally:
+        conn.close()
 
 
 def _trajectory_has_io_fields(trajectory: list[dict[str, Any]]) -> bool:

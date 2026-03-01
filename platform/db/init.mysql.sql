@@ -17,8 +17,7 @@ CREATE TABLE IF NOT EXISTS data_items (
   session_jsonl LONGTEXT NOT NULL,
   user_input TEXT NOT NULL,
   reference_output JSON NOT NULL,
-  trace_id VARCHAR(255),
-  reference_trajectory JSON,
+  mock_config JSON,
   created_by VARCHAR(255) NOT NULL,
   updated_by VARCHAR(255) NOT NULL,
   is_deleted TINYINT(1) NOT NULL DEFAULT 0,
@@ -121,7 +120,6 @@ CREATE TABLE IF NOT EXISTS agents (
   description TEXT NOT NULL,
   docker_image VARCHAR(1024) NOT NULL,
   openapi_spec JSON NOT NULL,
-  status VARCHAR(100) NOT NULL DEFAULT 'active',
   metadata JSON NOT NULL,
   runtime_spec_json JSON NOT NULL,
   created_by VARCHAR(255) NOT NULL,
@@ -132,7 +130,6 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT uq_agents_key_version UNIQUE (agent_key, version),
   INDEX idx_agents_key (agent_key),
-  INDEX idx_agents_status (status),
   INDEX idx_agents_is_deleted (is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -243,38 +240,64 @@ CREATE TABLE IF NOT EXISTS evaluate_results (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Seed evaluators
-INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('task_success', '任务成功', '你是一名工具选择审稿员。你的任务是：基于历史上下文、助手的实际工具调用序列与可用工具清单，判断工具选择是否合适（只判工具类型与调用时机是否匹配目标；忽略具体参数数值如坐标 x/y）。
+INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_name, api_style, api_key, created_by, updated_by) VALUES ('task_success', '任务成功', '你是一名专业的任务评估员。你的任务是：基于用户的任务目标、Agent的执行轨迹和最终输出，判断任务是否成功完成。
 
         <评判标准>
-        请忽略工具参数的具体设置，合适的工具应满足：
-        1. 工具的功能和问题需求相符，调用该工具应能有效且完全解决问题，就是 1 分。
-        2. 工具在当前可调用工具列表中，不是虚构或无效的工具，否则0分。
-        3. 调用的工具中有不符合用户意图的，整体工具选择即被视为错误(0分)。
-        4.	允许“等价工具”替代（例如点击“搜索”按钮 vs 按 Enter 提交），但需合理，比如：
-          	- 提交搜索：hotkey(enter) ⇆ 点击页面“Search/提交”按钮。
-	          - 打开应用/文件：left_double_click ⇆ click（在可见“打开”按钮后再 click）。
-	          - 滚动页面：scroll ⇆ hotkey(PageDown/Space)（如上下文明确可行）。
-	          - 上下文菜单操作：right_click + 菜单项点击 ⇆ 直接点击显式的“下载/打开”按钮（两者择一即可）。
-            注：若使用了功能等价但效率更低的工具导致动作执行次数不必要的增多(比如轨迹中出现超过3次低效选择工具)，则给0.5分。
+        评分采用三档制（1.0 / 0.5 / 0.0）：
+
+        1.0分（任务成功）：
+        - Agent完全理解了用户的意图和任务目标
+        - 任务目标已经完全实现，达到了用户的预期
+        - 最终输出符合用户需求，质量满足要求
+        - 如果任务涉及查找信息，找到的信息准确且完整
+        - 如果任务涉及操作执行，操作已经正确完成
+
+        0.5分（部分成功）：
+        - Agent基本理解了用户的意图
+        - 任务目标大部分完成，但存在轻微不足或遗漏
+        - 最终输出基本符合需求，但可能有细节问题
+        - 完成度达到可用程度，但未完全达到理想状态
+
+        0.0分（任务失败）：
+        - Agent未能理解用户的真实意图
+        - 任务目标未完成或严重偏离预期
+        - 最终输出不符合用户需求或存在重大错误
+        - 执行过程中出现致命错误导致任务无法完成
+        - Agent陷入循环或死锁状态无法继续
+
+        特殊情况：
+        - 如果任务客观上无法完成（如信息不存在、权限不足等），但Agent能正确识别并合理求助用户，视为任务成功（1.0分）
+        - 如果Agent最后调用了call_user寻求帮助，需要判断是否合理：合理的求助（如缺少必要信息）视为成功，不合理的求助（如遇到轻微困难就放弃）视为失败
         </评判标准>
 
         <输入>
         [轨迹]：
 ```json
-{{trajectory}}
+{{run.trajectory}}
 ```
         [Agent输出]
 ```json
-{{agent_output}}
+{{run.output}}
 ```
-        [可调用工具列表]：
-```json
-{{tools}}
+        [用户任务]：
+```
+{{data_item.input}}
 ```
         </输入>
         
         <思考指导>
-        首先，请通过查看输入的上下文理解用户的真实意图。如果输入中没有明确表达意图，请尝试从上下文或消息内容中合理推断。一旦你理解了目标，请严格根据评判标准分析助手的工具选择是否合适。
+        评估步骤：
+        1. 首先从输入中理解用户的任务目标是什么
+        2. 分析Agent的执行轨迹，看其是否正确理解了任务
+        3. 查看最终输出，判断是否完成了用户的目标
+        4. 综合考虑完成质量、效率和准确性
+        5. 根据评判标准给出最终评分（1.0/0.5/0.0）
+
+        注意事项：
+        - 重点关注任务目标的完成度，而非执行过程的效率
+        - 如果用户目标模糊，以合理推断的意图为准
+        - 考虑实际可操作性，不要求Agent完成客观上不可能的任务
+        - 对于复杂任务，允许分步骤逐一完成
         另外，注意一些细节：
           - 忽略参数但不忽略工具类型与时机（例如在地址栏输入 URL 应使用 type，提交可 hotkey(enter) 或点击“Search”）。
 	        - 冗余（重复 type/enter/wait）不影响正确/错误
@@ -324,11 +347,11 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
         <输入>
         [轨迹]：
 ```json
-{{trajectory}}
+{{run.trajectory}}
 ```
         [Agent输出]
 ```json
-{{agent_output}}
+{{run.output}}
 ```
         [可调用工具列表]：
 ```json
@@ -363,11 +386,11 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
         <输入>
         [轨迹]：
 ```json
-{{trajectory}}
+{{run.trajectory}}
 ```
         [Agent输出]
 ```json
-{{agent_output}}
+{{run.output}}
 ```
         [可调用工具列表]：
 ```json
@@ -404,11 +427,11 @@ INSERT INTO evaluators (evaluator_key, name, prompt_template, base_url, model_na
         <输入>
         [轨迹]：
 ```json
-{{trajectory}}
+{{run.trajectory}}
 ```
         [Agent输出]
 ```json
-{{agent_output}}
+{{run.output}}
 ```
         [可调用工具列表]：
 ```json

@@ -150,12 +150,7 @@ class ArcloopDockerSandbox(SandboxEnvironment):
         if docker_network:
             docker_cmd.extend(["--network", docker_network])
 
-        env_from_spec = runtime_spec.get("agent_env_template")
         merged_env: dict[str, str] = {}
-        if isinstance(env_from_spec, dict):
-            for key, value in env_from_spec.items():
-                if isinstance(key, str):
-                    merged_env[key] = str(value)
         for key, value in case_env.items():
             if isinstance(key, str):
                 merged_env[key] = str(value)

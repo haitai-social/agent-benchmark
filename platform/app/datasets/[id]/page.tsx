@@ -18,7 +18,6 @@ import {
   UserIcon
 } from "@/app/components/icons";
 import { SubmitButton } from "@/app/components/submit-button";
-import { ReferenceTrajectorySourceField } from "@/app/components/reference-trajectory-source-field";
 import { EntityDrawer } from "@/app/components/entity-drawer";
 import { FormField } from "@/app/components/form-field";
 import { ExpandableTextCell } from "@/app/components/expandable-text-cell";
@@ -36,31 +35,6 @@ function buildDetailHref(id: number, q: string, page: number, pageSize: number, 
   return qs ? `/datasets/${id}?${qs}` : `/datasets/${id}`;
 }
 
-async function resolveTrajectory(
-  trajectorySource: string,
-  manualReferenceTrajectoryRaw: string
-): Promise<{ traceId: string | null; referenceTrajectory: unknown | null }> {
-  if (trajectorySource.startsWith("trace:")) {
-    const traceId = trajectorySource.slice("trace:".length).trim();
-    if (!traceId) return { traceId: null, referenceTrajectory: null };
-    const traceRows = await dbQuery<{ raw: unknown }>(
-      `SELECT raw FROM otel_traces WHERE trace_id = $1 AND deleted_at IS NULL ORDER BY id ASC LIMIT 500`,
-      [traceId]
-    );
-    return {
-      traceId,
-      referenceTrajectory: traceRows.rows.length > 0 ? traceRows.rows.map((r) => r.raw) : [{ trace_id: traceId }]
-    };
-  }
-  if (trajectorySource === "manual") {
-    return {
-      traceId: null,
-      referenceTrajectory: manualReferenceTrajectoryRaw.trim() ? parseJsonOrWrap(manualReferenceTrajectoryRaw) : null
-    };
-  }
-  return { traceId: null, referenceTrajectory: null };
-}
-
 async function createItem(formData: FormData) {
   "use server";
   const user = await requireUser();
@@ -69,8 +43,6 @@ async function createItem(formData: FormData) {
   const datasetId = Number(datasetIdRaw);
   const sessionJsonl = String(formData.get("sessionJsonl") ?? "").trim();
   const userInput = String(formData.get("userInput") ?? "").trim();
-  const trajectorySource = String(formData.get("referenceTrajectorySource") ?? "").trim();
-  const manualReferenceTrajectoryRaw = String(formData.get("manualReferenceTrajectory") ?? "");
   const referenceOutputRaw = String(formData.get("referenceOutput") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
   const page = parsePage(String(formData.get("page") ?? "1"));
@@ -78,14 +50,13 @@ async function createItem(formData: FormData) {
 
   if (!datasetIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !userInput) return;
 
-  const { traceId, referenceTrajectory } = await resolveTrajectory(trajectorySource, manualReferenceTrajectoryRaw);
   const referenceOutput = referenceOutputRaw ? parseJsonOrWrap(referenceOutputRaw) : {};
 
   await dbQuery(
     `INSERT INTO data_items (
-      dataset_id, session_jsonl, user_input, reference_output, trace_id, reference_trajectory, created_by, updated_by, updated_at
+      dataset_id, session_jsonl, user_input, reference_output, mock_config, created_by, updated_by, updated_at
     )
-    SELECT $1,$2,$3,$4,$5,$6,$7,$7,CURRENT_TIMESTAMP
+    SELECT $1,$2,$3,$4,$5,$6,$6,CURRENT_TIMESTAMP
     FROM datasets d
     WHERE d.id = $1 AND d.deleted_at IS NULL`,
     [
@@ -93,8 +64,7 @@ async function createItem(formData: FormData) {
       sessionJsonl || "",
       userInput,
       JSON.stringify(referenceOutput),
-      traceId,
-      referenceTrajectory === null ? null : JSON.stringify(referenceTrajectory),
+      JSON.stringify({}),
       user.id
     ]
   );
@@ -168,8 +138,6 @@ async function updateItem(formData: FormData) {
   const itemId = Number(itemIdRaw);
   const sessionJsonl = String(formData.get("sessionJsonl") ?? "").trim();
   const userInput = String(formData.get("userInput") ?? "").trim();
-  const trajectorySource = String(formData.get("referenceTrajectorySource") ?? "").trim();
-  const manualReferenceTrajectoryRaw = String(formData.get("manualReferenceTrajectory") ?? "");
   const referenceOutputRaw = String(formData.get("referenceOutput") ?? "").trim();
   const q = String(formData.get("q") ?? "").trim();
   const page = parsePage(String(formData.get("page") ?? "1"));
@@ -177,7 +145,6 @@ async function updateItem(formData: FormData) {
 
   if (!datasetIdRaw || !itemIdRaw || !Number.isInteger(datasetId) || datasetId <= 0 || !Number.isInteger(itemId) || itemId <= 0 || !userInput) return;
 
-  const { traceId, referenceTrajectory } = await resolveTrajectory(trajectorySource, manualReferenceTrajectoryRaw);
   const referenceOutput = referenceOutputRaw ? parseJsonOrWrap(referenceOutputRaw) : {};
 
   await dbQuery(
@@ -185,9 +152,7 @@ async function updateItem(formData: FormData) {
      SET session_jsonl = $3,
          user_input = $4,
          reference_output = $5,
-         trace_id = $6,
-         reference_trajectory = $7,
-         updated_by = $8,
+         updated_by = $6,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND dataset_id = $2 AND deleted_at IS NULL`,
     [
@@ -196,8 +161,6 @@ async function updateItem(formData: FormData) {
       sessionJsonl || "",
       userInput,
       JSON.stringify(referenceOutput),
-      traceId,
-      referenceTrajectory === null ? null : JSON.stringify(referenceTrajectory),
       user.id
     ]
   );
@@ -248,7 +211,7 @@ export default async function DatasetDetailPage({
     return <section className="card">评测集不存在</section>;
   }
 
-  const [countResult, traceIds, editingItemResult] = await Promise.all([
+  const [countResult, editingItemResult] = await Promise.all([
     dbQuery<{ total_count: number | string }>(
       `SELECT COUNT(*) AS total_count
        FROM data_items
@@ -257,31 +220,22 @@ export default async function DatasetDetailPage({
          AND ($2 = '' OR LOWER(user_input) LIKE CONCAT('%', LOWER($3), '%'))`,
       [id, qv, qv]
     ),
-    dbQuery<{
-      trace_id: string;
-    }>(
-      `SELECT trace_id FROM otel_traces
-       WHERE deleted_at IS NULL AND trace_id IS NOT NULL AND trace_id <> ''
-       GROUP BY trace_id ORDER BY MAX(id) DESC LIMIT 200`
-    ),
     Number.isInteger(editId) && editId > 0
       ? dbQuery<{
           id: number;
           session_jsonl: string;
           user_input: string;
-          trace_id: string | null;
           reference_output: unknown;
-          reference_trajectory: unknown;
           updated_at: string;
           created_at: string;
         }>(
-          `SELECT id, session_jsonl, user_input, trace_id, reference_output, reference_trajectory, updated_at, created_at
+          `SELECT id, session_jsonl, user_input, reference_output, updated_at, created_at
            FROM data_items
            WHERE id = $1 AND dataset_id = $2 AND deleted_at IS NULL
            LIMIT 1`,
           [editId, id]
         )
-      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; session_jsonl: string; user_input: string; trace_id: string | null; reference_output: unknown; reference_trajectory: unknown; updated_at: string; created_at: string }>; rowCount: number })
+      : Promise.resolve({ rows: [], rowCount: 0 } as { rows: Array<{ id: number; session_jsonl: string; user_input: string; reference_output: unknown; updated_at: string; created_at: string }>; rowCount: number })
   ]);
 
   const total = Number(countResult.rows[0]?.total_count ?? 0);
@@ -291,13 +245,11 @@ export default async function DatasetDetailPage({
       id: number;
       session_jsonl: string;
       user_input: string;
-      trace_id: string | null;
       reference_output: unknown;
-      reference_trajectory: unknown;
       updated_at: string;
       created_at: string;
     }>(
-      `SELECT id, session_jsonl, user_input, trace_id, reference_output, reference_trajectory, updated_at, created_at
+      `SELECT id, session_jsonl, user_input, reference_output, updated_at, created_at
        FROM data_items
        WHERE dataset_id = $1
          AND deleted_at IS NULL
@@ -386,7 +338,6 @@ export default async function DatasetDetailPage({
                   <th>input</th>
                   <th>session_jsonl</th>
                   <th>reference_output</th>
-                  <th>trace/trajectory</th>
                   <th>更新时间</th>
                   <th>创建时间</th>
                   <th>操作</th>
@@ -409,12 +360,6 @@ export default async function DatasetDetailPage({
                     </td>
                     <td className="muted">
                       <ExpandableTextCell value={item.reference_output} previewLength={90} className="muted" />
-                    </td>
-                    <td className="muted">
-                      {item.trace_id ? <span className="tag">trace: {item.trace_id}</span> : null}
-                      <div>
-                        <ExpandableTextCell value={item.reference_trajectory} previewLength={90} className="muted" />
-                      </div>
                     </td>
                     <td>{formatDateTime(item.updated_at)}</td>
                     <td>{formatDateTime(item.created_at)}</td>
@@ -491,20 +436,6 @@ export default async function DatasetDetailPage({
                 accept=".json,.txt"
               />
             </FormField>
-
-            <ReferenceTrajectorySourceField
-              traceIds={traceIds.rows.map((t) => t.trace_id)}
-              defaultSource={
-                editingItem?.trace_id ? `trace:${editingItem.trace_id}` : editingItem?.reference_trajectory ? "manual" : ""
-              }
-              defaultManual={
-                !editingItem?.trace_id && editingItem?.reference_trajectory
-                  ? typeof editingItem.reference_trajectory === "string"
-                    ? editingItem.reference_trajectory
-                    : JSON.stringify(editingItem.reference_trajectory, null, 2)
-                  : ""
-              }
-            />
           </form>
           <div className="drawer-actions">
             <SubmitButton

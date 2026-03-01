@@ -328,8 +328,10 @@ class DbRepository:
     def _refresh_experiment_status_postgres(self, cur: Any, experiment_id: int) -> None:
         cur.execute("SELECT queue_status FROM experiments WHERE id = %s LIMIT 1", (experiment_id,))
         exp_row = cur.fetchone()
-        if exp_row and exp_row[0] in {"manual_terminated", "test_case"}:
+        current_queue_status = str(exp_row[0]) if exp_row and exp_row[0] is not None else ""
+        if current_queue_status == "manual_terminated":
             return
+        keep_test_case_status = current_queue_status == "test_case"
         cur.execute(
             """
             SELECT
@@ -353,6 +355,7 @@ class DbRepository:
             run_status = "failed"
         elif total > 0:
             run_status = "done"
+        next_queue_status = "test_case" if keep_test_case_status else run_status
         cur.execute(
             """
             UPDATE experiments
@@ -362,7 +365,7 @@ class DbRepository:
                    updated_at = CURRENT_TIMESTAMP
              WHERE id = %s
             """,
-            (run_status, run_status, run_status, experiment_id),
+            (next_queue_status, run_status, run_status, experiment_id),
         )
 
     def _persist_case_result_mysql(
@@ -616,6 +619,8 @@ class DbRepository:
             f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE);\n"
             "SET @failed=(SELECT COALESCE(SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END),0) "
             f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE);\n"
+            "SET @prev_queue_status=(SELECT queue_status FROM experiments WHERE id="
+            f"{lit(experiment_id)} LIMIT 1);\n"
             "SET @run_status=(CASE "
             "WHEN @total=0 THEN 'idle' "
             "WHEN @running>0 OR @pending>0 THEN 'consuming' "
@@ -623,9 +628,9 @@ class DbRepository:
             "WHEN @success=0 THEN 'failed' "
             "ELSE 'done' END);\n"
             "UPDATE experiments SET "
-            "queue_status=@run_status, "
-            "started_at=IF(@run_status='consuming' AND started_at IS NULL, CURRENT_TIMESTAMP, started_at), "
-            "finished_at=IF(@run_status IN ('done','failed'), CURRENT_TIMESTAMP, finished_at), "
+            "queue_status=IF(@prev_queue_status='manual_terminated', queue_status, IF(@prev_queue_status='test_case', 'test_case', @run_status)), "
+            "started_at=IF(@prev_queue_status<>'manual_terminated' AND @run_status='consuming' AND started_at IS NULL, CURRENT_TIMESTAMP, started_at), "
+            "finished_at=IF(@prev_queue_status<>'manual_terminated' AND @run_status IN ('done','failed'), CURRENT_TIMESTAMP, finished_at), "
             "updated_at=CURRENT_TIMESTAMP "
             f"WHERE id={lit(experiment_id)};\n"
             "COMMIT;"
@@ -745,6 +750,10 @@ class DbRepository:
                     f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE)"
                 ),
                 (
+                    "SET @prev_queue_status=(SELECT queue_status FROM experiments WHERE id="
+                    f"{lit(experiment_id)} LIMIT 1)"
+                ),
+                (
                     "SET @run_status=(CASE "
                     "WHEN @total=0 THEN 'idle' "
                     "WHEN @running>0 OR @pending>0 THEN 'consuming' "
@@ -754,9 +763,9 @@ class DbRepository:
                 ),
                 (
                     "UPDATE experiments SET "
-                    "queue_status=@run_status, "
-                    "started_at=IF(@run_status='consuming' AND started_at IS NULL, CURRENT_TIMESTAMP, started_at), "
-                    "finished_at=IF(@run_status IN ('done','failed'), CURRENT_TIMESTAMP, finished_at), "
+                    "queue_status=IF(@prev_queue_status='manual_terminated', queue_status, IF(@prev_queue_status='test_case', 'test_case', @run_status)), "
+                    "started_at=IF(@prev_queue_status<>'manual_terminated' AND @run_status='consuming' AND started_at IS NULL, CURRENT_TIMESTAMP, started_at), "
+                    "finished_at=IF(@prev_queue_status<>'manual_terminated' AND @run_status IN ('done','failed'), CURRENT_TIMESTAMP, finished_at), "
                     "updated_at=CURRENT_TIMESTAMP "
                     f"WHERE id={lit(experiment_id)}"
                 ),
@@ -790,8 +799,10 @@ class DbRepository:
     def _refresh_experiment_status_mysql(self, cur: Any, experiment_id: int) -> None:
         cur.execute("SELECT queue_status FROM experiments WHERE id = %s LIMIT 1", (experiment_id,))
         exp_row = cur.fetchone()
-        if exp_row and exp_row[0] in {"manual_terminated", "test_case"}:
+        current_queue_status = str(exp_row[0]) if exp_row and exp_row[0] is not None else ""
+        if current_queue_status == "manual_terminated":
             return
+        keep_test_case_status = current_queue_status == "test_case"
         cur.execute(
             """
             SELECT
@@ -816,6 +827,7 @@ class DbRepository:
             run_status = "failed"
         elif total > 0:
             run_status = "done"
+        next_queue_status = "test_case" if keep_test_case_status else run_status
         cur.execute(
             """
             UPDATE experiments
@@ -825,5 +837,5 @@ class DbRepository:
                    updated_at = CURRENT_TIMESTAMP
              WHERE id = %s
             """,
-            (run_status, run_status, run_status, experiment_id),
+            (next_queue_status, run_status, run_status, experiment_id),
         )

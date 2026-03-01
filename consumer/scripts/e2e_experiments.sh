@@ -58,9 +58,9 @@ if [[ "$kill_conflict" == "true" ]]; then
   fi
 fi
 
-echo "[acceptance] running direct acceptance (no RabbitMQ)..."
+echo "[acceptance] running direct acceptance (no RabbitMQ, mock agent defaults)..."
 set +e
-PYTHONPATH=src .venv/bin/python tests/acceptance/e2e_experiments.py
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/e2e/test_consume_a_mock_message.py
 result=$?
 set -e
 

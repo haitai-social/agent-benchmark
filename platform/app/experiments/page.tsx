@@ -311,7 +311,7 @@ export default async function ExperimentsPage({
     dbQuery<{ id: number; name: string; agent_key: string; version: string }>(
       `SELECT id, name, agent_key, version
        FROM agents
-       WHERE deleted_at IS NULL AND status = 'active'
+       WHERE deleted_at IS NULL
        ORDER BY updated_at DESC`
     ),
     dbQuery<{ id: number; name: string; evaluator_key: string }>(

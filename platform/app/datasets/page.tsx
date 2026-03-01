@@ -326,7 +326,6 @@ export default async function DatasetsPage({
                     <span className="tag">session_jsonl</span>
                     <span className="tag">input</span>
                     <span className="tag">reference_output</span>
-                    <span className="tag">reference_trajectory</span>
                   </div>
                 </td>
                 <td>{row.item_count}</td>
