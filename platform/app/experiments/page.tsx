@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery, engine, withTransaction } from "@/lib/db";
+import { formatDateTime } from "@/lib/datetime";
 import { PaginationControls } from "@/app/components/pagination-controls";
 import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
@@ -478,7 +479,7 @@ export default async function ExperimentsPage({
                 <td>{`${Number(e.case_done)}/${Number(e.case_total)} (fail:${Number(e.case_failed)})`}</td>
                 <td>{formatLatencyMs(e.avg_latency_ms)}</td>
                 <td>{formatDuration(e.started_at, e.finished_at)}</td>
-                <td>{new Date(e.created_at).toLocaleString()}</td>
+                <td>{formatDateTime(e.created_at)}</td>
                 <td>
                   <div className="row-actions">
                     <Link href={`/experiments/${e.id}`} className="text-btn">

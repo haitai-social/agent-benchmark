@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 import shlex
 import time
 from pathlib import PurePosixPath
@@ -87,13 +88,12 @@ class ArcloopDockerSandbox(SandboxEnvironment):
         if not write_result.success:
             raise RuntimeError(f"E_SANDBOX_WRITE_FILE: {write_result.stderr.strip()}")
 
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:
+    async def read_file(self, file: str, text: bool = True) -> str:
+        del text
         read_result = await self.exec(["cat", file], timeout=30)
         if not read_result.success:
             raise FileNotFoundError(file)
-        if text:
-            return read_result.stdout
-        return read_result.stdout.encode("utf-8")
+        return read_result.stdout
 
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
         del user
@@ -139,6 +139,10 @@ class ArcloopDockerSandbox(SandboxEnvironment):
         # Always rebuild per case.
         await _run_cmd(["docker", "rm", "-f", container_name], timeout=inspect_timeout)
         docker_cmd = ["docker", "run", "-d", "--name", container_name]
+        # On Linux hosts, map host.docker.internal explicitly.
+        # On Docker Desktop (macOS/Windows), this mapping is built-in and overriding it can break routing.
+        if platform.system() == "Linux":
+            docker_cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
         docker_cmd.extend(["--label", f"arcloop.inspect.task={task_slug}"])
         docker_cmd.extend(["--label", f"arcloop.inspect.group={group_slug}"])
 

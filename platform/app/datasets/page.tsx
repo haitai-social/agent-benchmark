@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { formatDateTime } from "@/lib/datetime";
 import { PaginationControls } from "@/app/components/pagination-controls";
 import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
@@ -240,7 +241,6 @@ export default async function DatasetsPage({
       <section className="page-hero">
         <div className="breadcrumb">评测 &nbsp;/&nbsp; Datasets</div>
         <h1>Datasets</h1>
-        <p className="muted">管理数据集、字段结构与版本演进。</p>
       </section>
 
       <section className="toolbar-row">
@@ -294,10 +294,11 @@ export default async function DatasetsPage({
           <input type="hidden" name="page" value={page} />
           <input type="hidden" name="pageSize" value={pageSize} />
         </form>
-        <table>
+        <table className="datasets-table">
           <thead>
             <tr>
               <th className="bulk-select-cell">选</th>
+              <th>ID</th>
               <th>名称</th>
               <th>列名</th>
               <th>DataItems</th>
@@ -314,6 +315,7 @@ export default async function DatasetsPage({
                 <td className="bulk-select-cell">
                   <input type="checkbox" name="selectedIds" value={row.id} form={bulkDeleteFormId} aria-label={`选择 Dataset ${row.id}`} />
                 </td>
+                <td><code>#{row.id}</code></td>
                 <td>
                   <Link href={`/datasets/${row.id}`} className="link-strong">
                     {row.name}
@@ -330,8 +332,8 @@ export default async function DatasetsPage({
                 <td>{row.item_count}</td>
                 <td>-</td>
                 <td className="muted">{row.description || "-"}</td>
-                <td>{row.updated_by.slice(0, 8)}</td>
-                <td>{new Date(row.updated_at).toLocaleString()}</td>
+                <td title={row.updated_by}>{row.updated_by.slice(0, 8)}</td>
+                <td>{formatDateTime(row.updated_at)}</td>
                 <td>
                   <div className="row-actions">
                     <Link href={`/datasets/${row.id}`} className="text-btn">

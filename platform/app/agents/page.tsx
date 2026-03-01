@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { formatDateTime } from "@/lib/datetime";
 import { PaginationControls } from "@/app/components/pagination-controls";
 import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
@@ -302,7 +303,6 @@ export default async function AgentsPage({
       <section className="page-hero">
         <div className="breadcrumb">评测 &nbsp;/&nbsp; Agents</div>
         <h1>Agents</h1>
-        <p className="muted">管理 Agent 实体与版本（agent_key + version）。</p>
       </section>
 
       <section className="toolbar-row">
@@ -361,13 +361,15 @@ export default async function AgentsPage({
           <input type="hidden" name="page" value={page} />
           <input type="hidden" name="pageSize" value={pageSize} />
         </form>
-        <table>
+        <table className="agents-table">
           <thead>
             <tr>
               <th className="bulk-select-cell">选</th>
+              <th>ID</th>
               <th>名称</th>
-              <th>Key / Version</th>
-              <th>Runtime</th>
+              <th>Key</th>
+              <th>Version</th>
+              <th>Docker Image</th>
               <th>Status</th>
               <th>更新时间</th>
               <th>操作</th>
@@ -376,27 +378,26 @@ export default async function AgentsPage({
           <tbody>
             {rows.map((row) => {
               const runtime = parseRuntimeSpec(row.runtime_spec_json);
-              const servicesCount = Array.isArray(runtime.services) ? runtime.services.length : 0;
-              const scorersCount = Array.isArray(runtime.scorers) ? runtime.scorers.length : 0;
               return (
               <tr key={row.id}>
                 <td className="bulk-select-cell">
                   <input type="checkbox" name="selectedIds" value={row.id} form={bulkDeleteFormId} aria-label={`选择 Agent ${row.id}`} />
                 </td>
+                <td><code>#{row.id}</code></td>
                 <td>{row.name}</td>
                 <td>
-                  <div><code>{row.agent_key}</code></div>
-                  <div className="muted"><code>{row.version}</code></div>
+                  <code>{row.agent_key}</code>
                 </td>
                 <td>
-                  <div><code>{runtime.runtime_type ?? "-"}</code></div>
-                  <div className="muted"><code>{runtime.agent_image ?? "-"}</code></div>
-                  <div className="muted">{`services:${servicesCount} scorers:${scorersCount}`}</div>
+                  <code>{row.version}</code>
+                </td>
+                <td className="agent-docker-cell">
+                  <code>{runtime.agent_image ?? "-"}</code>
                 </td>
                 <td>
                   <span className={`status-pill ${row.status}`}>{row.status}</span>
                 </td>
-                <td>{new Date(row.updated_at).toLocaleString()}</td>
+                <td>{formatDateTime(row.updated_at)}</td>
                 <td>
                   <div className="row-actions">
                     <Link

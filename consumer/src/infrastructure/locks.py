@@ -2,12 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from typing import Protocol
 
 import redis
 
 from .config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+class MessageLock(Protocol):
+    def build_suffix(self, message_id: str, payload_bytes: bytes) -> str:
+        ...
+
+    def already_processed(self, suffix: str) -> bool:
+        ...
+
+    def acquire_processing(self, suffix: str) -> bool:
+        ...
+
+    def mark_processed(self, suffix: str) -> None:
+        ...
+
+    def release_processing(self, suffix: str) -> None:
+        ...
 
 
 class RedisMessageLock:

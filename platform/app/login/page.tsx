@@ -20,7 +20,7 @@ export default async function LoginPage({
   const features = [
     { icon: DatasetIcon, label: "Datasets 与 DataItems" },
     { icon: JudgeIcon, label: "评估器管理" },
-    { icon: TraceIcon, label: "Trace 检索" },
+    { icon: TraceIcon, label: "OTEL 检索" },
     { icon: FlaskIcon, label: "实验运行" }
   ];
 
@@ -32,7 +32,7 @@ export default async function LoginPage({
           <div className="login-copy">
             <h1>Agent Benchmark</h1>
             <p className="login-lead">
-              一站式管理评测集、评估器、Trace 与实验任务，
+              一站式管理评测集、评估器、OTEL 与实验任务，
               <span className="nowrap-cn">清晰对比</span>每次版本迭代的效果变化，并基于统一视图快速定位问题样本、验证优化是否真正生效。
             </p>
 
@@ -48,7 +48,7 @@ export default async function LoginPage({
             <div className="login-data-pills">
               <span>Dataset</span>
               <span>Evaluator</span>
-              <span>Trace</span>
+              <span>OTEL</span>
               <span>Experiment</span>
             </div>
           </div>

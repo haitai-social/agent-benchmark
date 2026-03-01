@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { formatDateTime } from "@/lib/datetime";
 import { PaginationControls } from "@/app/components/pagination-controls";
 import { BulkSelectionControls } from "@/app/components/bulk-selection-controls";
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
@@ -20,6 +21,7 @@ import { SubmitButton } from "@/app/components/submit-button";
 import { ReferenceTrajectorySourceField } from "@/app/components/reference-trajectory-source-field";
 import { EntityDrawer } from "@/app/components/entity-drawer";
 import { FormField } from "@/app/components/form-field";
+import { ExpandableTextCell } from "@/app/components/expandable-text-cell";
 import { TextareaWithFileUpload } from "@/app/components/textarea-with-file-upload";
 
 function buildDetailHref(id: number, q: string, page: number, pageSize: number, extras?: Record<string, string>) {
@@ -42,7 +44,7 @@ async function resolveTrajectory(
     const traceId = trajectorySource.slice("trace:".length).trim();
     if (!traceId) return { traceId: null, referenceTrajectory: null };
     const traceRows = await dbQuery<{ raw: unknown }>(
-      `SELECT raw FROM traces WHERE trace_id = $1 AND deleted_at IS NULL ORDER BY id ASC LIMIT 500`,
+      `SELECT raw FROM otel_traces WHERE trace_id = $1 AND deleted_at IS NULL ORDER BY id ASC LIMIT 500`,
       [traceId]
     );
     return {
@@ -258,7 +260,7 @@ export default async function DatasetDetailPage({
     dbQuery<{
       trace_id: string;
     }>(
-      `SELECT trace_id FROM traces
+      `SELECT trace_id FROM otel_traces
        WHERE deleted_at IS NULL AND trace_id IS NOT NULL AND trace_id <> ''
        GROUP BY trace_id ORDER BY MAX(id) DESC LIMIT 200`
     ),
@@ -327,15 +329,14 @@ export default async function DatasetDetailPage({
             </Link>
             <div>
               <h1>{dataset.name}</h1>
-              <p className="muted">评测集详情与 DataItems 维护</p>
             </div>
           </div>
           <div className="meta-pills">
             <span className="meta-pill">描述: {dataset.description || "-"}</span>
-            <span className="meta-pill">更新时间: {new Date(dataset.updated_at).toLocaleString()}</span>
-            <span className="meta-pill">创建时间: {new Date(dataset.created_at).toLocaleString()}</span>
+            <span className="meta-pill">更新时间: {formatDateTime(dataset.updated_at)}</span>
+            <span className="meta-pill">创建时间: {formatDateTime(dataset.created_at)}</span>
             <span className="meta-pill">
-              <UserIcon width={14} height={14} /> {dataset.created_by.slice(0, 8)}
+              <UserIcon width={14} height={14} /> <span title={dataset.created_by}>{dataset.created_by.slice(0, 8)}</span>
             </span>
           </div>
         </section>
@@ -377,13 +378,13 @@ export default async function DatasetDetailPage({
               <input type="hidden" name="page" value={page} />
               <input type="hidden" name="pageSize" value={pageSize} />
             </form>
-            <table>
+            <table className="data-items-table">
               <thead>
                 <tr>
                   <th className="bulk-select-cell">选</th>
                   <th>ID</th>
-                  <th>session_jsonl</th>
                   <th>input</th>
+                  <th>session_jsonl</th>
                   <th>reference_output</th>
                   <th>trace/trajectory</th>
                   <th>更新时间</th>
@@ -400,15 +401,23 @@ export default async function DatasetDetailPage({
                     <td>
                       <code>{item.id}</code>
                     </td>
-                    <td className="muted">{item.session_jsonl.slice(0, 80)}</td>
-                    <td className="muted">{item.user_input.slice(0, 80)}</td>
-                    <td className="muted">{JSON.stringify(item.reference_output).slice(0, 90)}...</td>
+                    <td className="muted">
+                      <ExpandableTextCell value={item.user_input} previewLength={80} className="muted" />
+                    </td>
+                    <td className="muted">
+                      <ExpandableTextCell value={item.session_jsonl} previewLength={80} className="muted" />
+                    </td>
+                    <td className="muted">
+                      <ExpandableTextCell value={item.reference_output} previewLength={90} className="muted" />
+                    </td>
                     <td className="muted">
                       {item.trace_id ? <span className="tag">trace: {item.trace_id}</span> : null}
-                      <div>{JSON.stringify(item.reference_trajectory).slice(0, 90)}...</div>
+                      <div>
+                        <ExpandableTextCell value={item.reference_trajectory} previewLength={90} className="muted" />
+                      </div>
                     </td>
-                    <td>{new Date(item.updated_at).toLocaleString()}</td>
-                    <td>{new Date(item.created_at).toLocaleString()}</td>
+                    <td>{formatDateTime(item.updated_at)}</td>
+                    <td>{formatDateTime(item.created_at)}</td>
                     <td>
                       <div className="row-actions">
                         <Link

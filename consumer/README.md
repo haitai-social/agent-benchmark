@@ -28,15 +28,6 @@
 - `CONSUMER_DOCKER_PULL_TIMEOUT_SECONDS`：pull 超时（default `120`）
 - `CONSUMER_DOCKER_RUN_TIMEOUT_SECONDS`：run 超时（default `60`）
 - `CONSUMER_DOCKER_INSPECT_TIMEOUT_SECONDS`：inspect 超时（default `10`）
-- `CONSUMER_OTEL_ENABLED`：是否开启 OTel 轨迹优先（default `false`）
-- `CONSUMER_OTEL_ENDPOINT`：OTel 上报地址（可选，不填则使用内建 collector）
-- `CONSUMER_OTEL_QUERY_TIMEOUT_SECONDS`：run_case 查询 traces 超时（default `10`）
-- `CONSUMER_OTEL_PROTOCOL`：OTel exporter 协议（default `http/protobuf`）
-- `CONSUMER_OTEL_COLLECTOR_ENABLED`：是否启用内建 collector（default `true`）
-- `CONSUMER_OTEL_COLLECTOR_HOST`：collector 监听地址（default `0.0.0.0`）
-- `CONSUMER_OTEL_COLLECTOR_PORT`：collector 端口（default `14318`）
-- `CONSUMER_OTEL_COLLECTOR_PATH`：collector 路径（default `/v1/traces`）
-- `CONSUMER_OTEL_PUBLIC_ENDPOINT`：注入容器的 OTel endpoint（default `http://host.docker.internal:14318/v1/traces`）
 
 ## Redis 去重锁配置（防重复消费）
 
@@ -72,13 +63,14 @@ Consumer 使用 `inspect_ai` 的 sandbox provider（`arcloop_docker`）管理容
 
 ## OTel 轨迹回收（MVP）
 
-当 `CONSUMER_OTEL_ENABLED=true` 时，consumer 在 case 执行时会：
+consumer 在 case 执行时会：
 
 1. 向 agent 容器注入 OTel 环境变量（`OTEL_SERVICE_NAME`、`OTEL_RESOURCE_ATTRIBUTES` 等）。
-2. agent 将 spans 上报到内建 collector（或 `CONSUMER_OTEL_ENDPOINT`）。
-3. case 完成后，consumer 按 `benchmark.run_case_id` 从 collector 内存中查询 spans。
-4. 将 spans 映射为平台 trajectory 结构并写入 `run_cases.agent_trajectory`。
-5. 若 OTel 查询失败或无数据，回退 stdout JSON trajectory 解析。
+2. agent 将 spans 上报到固定 endpoint：`http://host.docker.internal:14318/api/otel/v1/traces`。
+3. 内建 collector 会直接解析并写入数据库 `traces` 表。
+4. case 完成后，consumer 按 `benchmark.run_case_id` 查询 spans。
+5. 将 spans 映射为平台 trajectory 结构并写入 `run_cases.agent_trajectory`。
+6. 若 OTel 查询失败或无数据，回退 stdout JSON trajectory 解析。
 
 日志关键字：
 - `OTEL_QUERY_START`
@@ -86,14 +78,49 @@ Consumer 使用 `inspect_ai` 的 sandbox provider（`arcloop_docker`）管理容
 - `E_OTEL_QUERY_FAILED`
 - `OTEL_FALLBACK_STDOUT`
 
-## MockSideCar（Testcontainers）
+## Mock Gateway（统一网络 Mock）
 
-当 run case 携带 `mock_config` 时，Consumer 会用 testcontainers 启动 WireMock sidecar：
+当 run case 携带 `mock_config` 时，Consumer 会启动内建 Python Mock Gateway，并自动给 agent 容器注入 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`（无需改 Agent 代码）。
 
-- 启动 mock 容器并等待 ready
-- 将路由规则写入 WireMock admin API
-- 将 sidecar 地址注入 Agent 容器环境变量
-- case 结束后自动销毁 sidecar
+`mock_config` 新结构（Breaking）：
+
+```json
+{
+  "passthrough": true,
+  "rules": [
+    {
+      "name": "news-json",
+      "match": {
+        "methods": ["GET"],
+        "url_regex": "https://api\\.example\\.com/news.*"
+      },
+      "response": {
+        "type": "json",
+        "status": 200,
+        "json": {
+          "items": ["a", "b"]
+        }
+      }
+    },
+    {
+      "name": "dynamic-python",
+      "match": {
+        "methods": ["POST"],
+        "path": "/v1/rewrite"
+      },
+      "response": {
+        "type": "python",
+        "python_code": "def handle(request):\\n    return {'status': 200, 'json': {'echo': request.get('body_text', '')}}"
+      }
+    }
+  ]
+}
+```
+
+说明：
+- `response.type=json`：按配置返回 JSON。
+- `response.type=python`：执行 `python_code` 中的 `handle(request)`，返回动态响应。
+- 内建默认 OTEL Mock：`POST /api/otel/v1/traces` 会拦截请求、解析 payload 并写入 `traces` 表，然后返回 200；日志关键字：`MOCK_GATEWAY_OTEL_DEFAULT_HIT`。
 
 ## 运行
 

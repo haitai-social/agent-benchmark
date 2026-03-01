@@ -48,13 +48,12 @@ finalize() {
 }
 trap finalize EXIT
 
-collector_enabled="${CONSUMER_OTEL_COLLECTOR_ENABLED:-true}"
-collector_port="${CONSUMER_OTEL_COLLECTOR_PORT:-14318}"
+collector_port="14318"
 kill_conflict="${ACCEPTANCE_KILL_PORT_CONFLICT:-true}"
-if [[ "$collector_enabled" == "true" && "$kill_conflict" == "true" ]]; then
+if [[ "$kill_conflict" == "true" ]]; then
   pids="$(lsof -t -nP -iTCP:${collector_port} -sTCP:LISTEN 2>/dev/null || true)"
   if [[ -n "$pids" ]]; then
-    echo "[acceptance] collector port ${collector_port} occupied, killing pids: ${pids}"
+    echo "[acceptance] otel collector port ${collector_port} occupied, killing pids: ${pids}"
     kill -9 ${pids} || true
   fi
 fi

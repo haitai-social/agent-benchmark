@@ -5,19 +5,36 @@ from typing import Any
 
 
 @dataclass
-class MockRoute:
-    path: str
-    method: str
-    status_code: int
-    body: str = ""
+class MockMatch:
+    methods: list[str] = field(default_factory=list)
+    url: str | None = None
+    url_regex: str | None = None
+    host: str | None = None
+    path: str | None = None
+    path_regex: str | None = None
+
+
+@dataclass
+class MockResponse:
+    type: str = "json"  # json | text | python
+    status: int = 200
     headers: dict[str, str] = field(default_factory=dict)
+    json_body: Any = None
+    text_body: str = ""
+    python_code: str = ""
+
+
+@dataclass
+class MockRule:
+    name: str = ""
+    match: MockMatch = field(default_factory=MockMatch)
+    response: MockResponse = field(default_factory=MockResponse)
 
 
 @dataclass
 class MockConfig:
-    base_url: str = ""
-    headers: dict[str, str] = field(default_factory=dict)
-    routes: list[MockRoute] = field(default_factory=list)
+    passthrough: bool = True
+    rules: list[MockRule] = field(default_factory=list)
 
 
 @dataclass

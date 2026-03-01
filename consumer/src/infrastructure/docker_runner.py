@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import platform
 import subprocess
 import time
 from typing import Any
 
 from domain.contracts import CaseExecutionResult, ExperimentRunRequested, RunCaseInput
-from .mock_sidecar import start_mock_sidecar
+from .mock_gateway.runtime import start_mock_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ class DockerRunner:
             container_image=image,
         )
 
-        sidecar = start_mock_sidecar(run_case.mock_config)
+        sidecar = start_mock_gateway(run_case.mock_config)
         if sidecar:
             result.mock_sidecar_endpoint = sidecar.endpoint
 
@@ -55,12 +56,22 @@ class DockerRunner:
             container_id = self._docker_run(image, container_name, env, runtime_spec)
             result.container_id = container_id
             case_exec_command = str(runtime_spec.get("case_exec_command") or "").strip()
+            after_exec_command = str(runtime_spec.get("after_exec_command") or "").strip()
             if case_exec_command:
                 logger.info("code=CASE_EXEC_MODE mode=sandbox_exec run_case_id=%s", run_case.run_case_id)
                 self._wait_container_ready(container_name, runtime_spec)
                 exit_code, exec_logs = self._docker_exec(container_name, case_exec_command)
+                after_exit_code = 0
+                after_logs = ""
+                if exit_code == 0 and after_exec_command:
+                    after_exit_code, after_logs = self._docker_exec(container_name, after_exec_command)
                 _, container_logs = self._docker_logs(container_name)
-                logs = f"[case-exec]\n{exec_logs}\n\n[container]\n{container_logs}".strip()
+                logs = f"[case-exec]\n{exec_logs}".strip()
+                if after_logs:
+                    logs = f"{logs}\n\n[after-exec]\n{after_logs}".strip()
+                logs = f"{logs}\n\n[container]\n{container_logs}".strip()
+                if exit_code == 0:
+                    exit_code = after_exit_code
             else:
                 logger.info("code=CASE_EXEC_MODE mode=one_shot_wait run_case_id=%s", run_case.run_case_id)
                 exit_code, logs = self._docker_wait_and_logs(container_name)
@@ -75,7 +86,7 @@ class DockerRunner:
 
             result.status = "success" if exit_code == 0 else "failed"
             if exit_code != 0:
-                result.error_message = f"E_AGENT_EXIT_NON_ZERO: exit code {exit_code}"
+                result.error_message = f"E_CASE_EXEC_NON_ZERO: exit code {exit_code}"
         except Exception as exc:
             result.error_message = str(exc)
         finally:
@@ -115,6 +126,10 @@ class DockerRunner:
 
     def _docker_run(self, image: str, container_name: str, env: dict[str, str], runtime_spec: dict[str, Any]) -> str:
         cmd = ["docker", "run", "-d", "--name", container_name]
+        # Linux engines usually need explicit host-gateway mapping.
+        # Docker Desktop provides host.docker.internal natively; overriding it can break routing.
+        if platform.system() == "Linux":
+            cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
         if self.docker_network:
             cmd.extend(["--network", self.docker_network])
         for key, value in sorted(env.items()):
@@ -218,9 +233,46 @@ class DockerRunner:
                     env[key] = str(value)
         if run_case.trace_id:
             env["BENCHMARK_TRACE_ID"] = run_case.trace_id
+        existing_resource_attrs = str(env.get("OTEL_RESOURCE_ATTRIBUTES") or "").strip()
+        injected_resource_attrs = ",".join(
+            [
+                f"benchmark.experiment_id={message.experiment.id}",
+                f"benchmark.run_case_id={run_case.run_case_id}",
+                f"benchmark.data_item_id={run_case.data_item_id}",
+            ]
+        )
+        env["OTEL_RESOURCE_ATTRIBUTES"] = (
+            f"{existing_resource_attrs},{injected_resource_attrs}"
+            if existing_resource_attrs
+            else injected_resource_attrs
+        )
+        existing_headers = str(env.get("OTEL_EXPORTER_OTLP_HEADERS") or "").strip()
+        injected_headers = ",".join(
+            [
+                f"x-benchmark-experiment-id={message.experiment.id}",
+                f"x-benchmark-run-case-id={run_case.run_case_id}",
+                f"x-benchmark-data-item-id={run_case.data_item_id}",
+            ]
+        )
+        merged_headers = f"{existing_headers},{injected_headers}" if existing_headers else injected_headers
+        env["OTEL_EXPORTER_OTLP_HEADERS"] = merged_headers
+        env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = merged_headers
         if mock_base_url:
-            env["BENCHMARK_MOCK_BASE_URL"] = mock_base_url
+            env.update(self._build_mock_proxy_env(mock_base_url))
         return env
+
+    def _build_mock_proxy_env(self, proxy_url: str) -> dict[str, str]:
+        no_proxy_value = "127.0.0.1,localhost,host.docker.internal"
+        return {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "ALL_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
+            "all_proxy": proxy_url,
+            "NO_PROXY": no_proxy_value,
+            "no_proxy": no_proxy_value,
+        }
 
     def _parse_agent_output(self, raw_logs: str) -> dict[str, Any] | None:
         lines = [line.strip() for line in raw_logs.splitlines() if line.strip()]

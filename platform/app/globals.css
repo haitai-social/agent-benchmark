@@ -1123,11 +1123,50 @@ a {
   border-color: #111827;
 }
 
-.exp-table-cell-truncate {
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.otel-tab-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.exp-runcase-table {
+  table-layout: fixed;
+}
+
+.exp-runcase-table th:nth-child(1),
+.exp-runcase-table td:nth-child(1) {
+  width: 90px;
   white-space: nowrap;
+}
+
+.exp-runcase-table th:nth-child(2),
+.exp-runcase-table td:nth-child(2) {
+  width: 110px;
+  white-space: nowrap;
+}
+
+.exp-runcase-table th:nth-child(7),
+.exp-runcase-table td:nth-child(7) {
+  width: 86px;
+  white-space: nowrap;
+}
+
+.exp-runcase-table th:nth-child(8),
+.exp-runcase-table td:nth-child(8) {
+  width: 72px;
+  white-space: nowrap;
+}
+
+.exp-table-cell-truncate {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .exp-eval-reason-cell {
@@ -1147,6 +1186,313 @@ a {
 
 .exp-metric-grid.refined {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.evaluators-table {
+  table-layout: fixed;
+}
+
+.evaluators-table th:nth-child(1),
+.evaluators-table td:nth-child(1) {
+  width: 40px;
+}
+
+.evaluators-table th:nth-child(2),
+.evaluators-table td:nth-child(2) {
+  width: 72px;
+  white-space: nowrap;
+}
+
+.evaluators-table th:nth-child(3),
+.evaluators-table td:nth-child(3) {
+  width: 150px;
+}
+
+.evaluators-table th:nth-child(4),
+.evaluators-table td:nth-child(4) {
+  width: 190px;
+}
+
+.evaluators-table th:nth-child(5),
+.evaluators-table td:nth-child(5) {
+  width: 280px;
+}
+
+.evaluators-table th:nth-child(6),
+.evaluators-table td:nth-child(6) {
+  width: 160px;
+}
+
+.evaluators-table th:nth-child(7),
+.evaluators-table td:nth-child(7) {
+  width: 96px;
+  white-space: nowrap;
+}
+
+.evaluators-table th:nth-child(9),
+.evaluators-table td:nth-child(9) {
+  width: 88px;
+  white-space: nowrap;
+}
+
+.evaluator-name-cell {
+  white-space: normal;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.evaluator-endpoint-cell code {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.evaluator-api-cell code {
+  white-space: nowrap;
+}
+
+.evaluator-model-cell code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.evaluator-prompt-cell {
+  max-width: 320px;
+}
+
+.evaluator-prompt-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.agents-table {
+  table-layout: fixed;
+}
+
+.agents-table th:nth-child(1),
+.agents-table td:nth-child(1) {
+  width: 40px;
+}
+
+.agents-table th:nth-child(2),
+.agents-table td:nth-child(2) {
+  width: 74px;
+  white-space: nowrap;
+}
+
+.agents-table th:nth-child(3),
+.agents-table td:nth-child(3) {
+  width: 180px;
+}
+
+.agents-table th:nth-child(4),
+.agents-table td:nth-child(4) {
+  width: 170px;
+}
+
+.agents-table th:nth-child(5),
+.agents-table td:nth-child(5) {
+  width: 110px;
+}
+
+.agents-table th:nth-child(6),
+.agents-table td:nth-child(6) {
+  width: 280px;
+}
+
+.agents-table th:nth-child(7),
+.agents-table td:nth-child(7) {
+  width: 90px;
+  white-space: nowrap;
+}
+
+.agents-table th:nth-child(8),
+.agents-table td:nth-child(8) {
+  width: 160px;
+  white-space: nowrap;
+}
+
+.agents-table th:nth-child(9),
+.agents-table td:nth-child(9) {
+  width: 88px;
+  white-space: nowrap;
+}
+
+.agent-docker-cell code {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.datasets-table,
+.data-items-table,
+.traces-table,
+.otel-traces-table,
+.otel-logs-table {
+  table-layout: fixed;
+}
+
+.datasets-table th:nth-child(1),
+.datasets-table td:nth-child(1) {
+  width: 40px;
+}
+
+.datasets-table th:nth-child(2),
+.datasets-table td:nth-child(2) {
+  width: 74px;
+  white-space: nowrap;
+}
+
+.datasets-table th:nth-child(3),
+.datasets-table td:nth-child(3) {
+  width: 180px;
+}
+
+.datasets-table th:nth-child(4),
+.datasets-table td:nth-child(4) {
+  width: 210px;
+}
+
+.datasets-table th:nth-child(5),
+.datasets-table td:nth-child(5),
+.datasets-table th:nth-child(6),
+.datasets-table td:nth-child(6) {
+  width: 90px;
+  white-space: nowrap;
+}
+
+.datasets-table th:nth-child(8),
+.datasets-table td:nth-child(8),
+.datasets-table th:nth-child(9),
+.datasets-table td:nth-child(9),
+.datasets-table th:nth-child(10),
+.datasets-table td:nth-child(10) {
+  width: 96px;
+  white-space: nowrap;
+}
+
+.data-items-table th:nth-child(1),
+.data-items-table td:nth-child(1) {
+  width: 40px;
+}
+
+.data-items-table th:nth-child(2),
+.data-items-table td:nth-child(2) {
+  width: 74px;
+  white-space: nowrap;
+}
+
+.data-items-table th:nth-child(3),
+.data-items-table td:nth-child(3) {
+  width: 220px;
+}
+
+.data-items-table th:nth-child(4),
+.data-items-table td:nth-child(4) {
+  width: 200px;
+}
+
+.data-items-table th:nth-child(5),
+.data-items-table td:nth-child(5),
+.data-items-table th:nth-child(6),
+.data-items-table td:nth-child(6) {
+  width: 220px;
+}
+
+.data-items-table th:nth-child(7),
+.data-items-table td:nth-child(7),
+.data-items-table th:nth-child(8),
+.data-items-table td:nth-child(8),
+.data-items-table th:nth-child(9),
+.data-items-table td:nth-child(9) {
+  width: 96px;
+  white-space: nowrap;
+}
+
+.traces-table th:nth-child(1),
+.traces-table td:nth-child(1),
+.otel-traces-table th:nth-child(1),
+.otel-traces-table td:nth-child(1),
+.otel-logs-table th:nth-child(1),
+.otel-logs-table td:nth-child(1) {
+  width: 40px;
+}
+
+.traces-table th:nth-child(2),
+.traces-table td:nth-child(2),
+.otel-traces-table th:nth-child(2),
+.otel-traces-table td:nth-child(2),
+.otel-logs-table th:nth-child(2),
+.otel-logs-table td:nth-child(2) {
+  width: 74px;
+  white-space: nowrap;
+}
+
+.traces-table th:nth-child(3),
+.traces-table td:nth-child(3),
+.traces-table th:nth-child(4),
+.traces-table td:nth-child(4),
+.otel-traces-table th:nth-child(3),
+.otel-traces-table td:nth-child(3),
+.otel-traces-table th:nth-child(4),
+.otel-traces-table td:nth-child(4),
+.otel-logs-table th:nth-child(3),
+.otel-logs-table td:nth-child(3),
+.otel-logs-table th:nth-child(4),
+.otel-logs-table td:nth-child(4) {
+  width: 180px;
+}
+
+.traces-table th:nth-child(6),
+.traces-table td:nth-child(6),
+.traces-table th:nth-child(7),
+.traces-table td:nth-child(7),
+.traces-table th:nth-child(8),
+.traces-table td:nth-child(8),
+.traces-table th:nth-child(9),
+.traces-table td:nth-child(9),
+.otel-traces-table th:nth-child(6),
+.otel-traces-table td:nth-child(6),
+.otel-traces-table th:nth-child(7),
+.otel-traces-table td:nth-child(7),
+.otel-traces-table th:nth-child(8),
+.otel-traces-table td:nth-child(8),
+.otel-traces-table th:nth-child(9),
+.otel-traces-table td:nth-child(9) {
+  width: 96px;
+  white-space: nowrap;
+}
+
+.otel-logs-table th:nth-child(5),
+.otel-logs-table td:nth-child(5),
+.otel-logs-table th:nth-child(6),
+.otel-logs-table td:nth-child(6),
+.otel-logs-table th:nth-child(8),
+.otel-logs-table td:nth-child(8),
+.otel-logs-table th:nth-child(9),
+.otel-logs-table td:nth-child(9) {
+  width: 96px;
+  white-space: nowrap;
+}
+
+.otel-logs-table th:nth-child(7),
+.otel-logs-table td:nth-child(7) {
+  width: 300px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .exp-metric-card {

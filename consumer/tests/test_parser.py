@@ -29,8 +29,13 @@ def test_parse_message_with_mock_config() -> None:
                 "reference_trajectory": [],
                 "reference_output": {},
                 "mock_config": {
-                    "routes": [
-                        {"path": "/healthz", "method": "GET", "status_code": 200, "body": "ok"}
+                    "passthrough": False,
+                    "rules": [
+                        {
+                            "name": "healthz-json",
+                            "match": {"methods": ["GET"], "path": "/healthz"},
+                            "response": {"type": "json", "status": 200, "json": {"ok": True}},
+                        }
                     ]
                 },
             }
@@ -39,4 +44,5 @@ def test_parse_message_with_mock_config() -> None:
     }
     msg = parse_message(payload)
     assert msg.run_cases[0].mock_config is not None
-    assert msg.run_cases[0].mock_config.routes[0].path == "/healthz"
+    assert msg.run_cases[0].mock_config.passthrough is False
+    assert msg.run_cases[0].mock_config.rules[0].match.path == "/healthz"

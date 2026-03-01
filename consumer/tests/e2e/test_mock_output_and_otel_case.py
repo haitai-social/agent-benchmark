@@ -6,59 +6,79 @@ import os
 import random
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
+import pymysql
 
 import pytest
 
 from app.message_processor import MessageProcessor
-from domain.parser import parse_message
-from infrastructure.config import load_settings
+from infrastructure.config import Settings, load_settings
 from infrastructure.db_repository import DbRepository
 from infrastructure.docker_runner import DockerRunner
-from infrastructure.otel_collector import OTelCollectorServer, OTelSpanStore
-from infrastructure.trace_repository import TraceIngestRepository, TraceRepository
 from runtime.inspect_runner import InspectRunner
 
 
 class _NoopLock:
-    def build_suffix(self, message_id: str, body: bytes) -> str:
-        del body
+    def build_suffix(self, message_id: str, payload_bytes: bytes) -> str:
+        del payload_bytes
         return message_id
 
-    def already_processed(self, key_suffix: str) -> bool:
-        del key_suffix
+    def already_processed(self, suffix: str) -> bool:
+        del suffix
         return False
 
-    def acquire_processing(self, key_suffix: str) -> bool:
-        del key_suffix
+    def acquire_processing(self, suffix: str) -> bool:
+        del suffix
         return True
 
-    def release_processing(self, key_suffix: str) -> None:
-        del key_suffix
+    def release_processing(self, suffix: str) -> None:
+        del suffix
 
-    def mark_processed(self, key_suffix: str) -> None:
-        del key_suffix
+    def mark_processed(self, suffix: str) -> None:
+        del suffix
 
 
-MOCK_AGENT_KEY = "mock-output-and-otel"
-MOCK_AGENT_VERSION = "v1"
+MOCK_AGENT_KEY = os.getenv("ACCEPTANCE_AGENT_KEY", "mock-output-and-otel")
+MOCK_AGENT_VERSION = os.getenv("ACCEPTANCE_AGENT_VERSION", "v1")
+MOCK_AGENT_NAME = os.getenv("ACCEPTANCE_AGENT_NAME", "")
+
+@dataclass(frozen=True)
+class E2EOptions:
+    timeout_seconds: int
+    max_evaluators: int
+    max_data_items: int
+    random_seed: int
+    created_by: str
+
+
+def _load_test_options() -> E2EOptions:
+    return E2EOptions(
+        timeout_seconds=max(1, int(os.getenv("ACCEPTANCE_TIMEOUT_SECONDS", "300"))),
+        max_evaluators=max(1, int(os.getenv("ACCEPTANCE_MAX_EVALUATORS", "1"))),
+        max_data_items=max(1, int(os.getenv("ACCEPTANCE_MAX_DATA_ITEMS", "1"))),
+        random_seed=int(os.getenv("ACCEPTANCE_RANDOM_SEED", "20260228")),
+        created_by=os.getenv("ACCEPTANCE_CREATED_BY", "e2e-test"),
+    )
 
 
 @pytest.mark.e2e
 def test_mock_output_and_otel_trajectory_has_events() -> None:
-    if not os.environ.get("MYSQL_SERVER"):
-        pytest.skip("requires mysql envs from .env")
+    try:
+        settings = load_settings()
+    except ValueError as exc:
+        pytest.skip(f"requires runtime settings: {exc}")
+    options = _load_test_options()
+    if settings.database_engine != "mysql" or not settings.mysql_server or not settings.mysql_user or not settings.mysql_db:
+        pytest.skip("requires mysql settings")
 
-    os.environ.setdefault("CONSUMER_OTEL_ENABLED", "true")
-    os.environ.setdefault("CONSUMER_OTEL_COLLECTOR_ENABLED", "true")
-    os.environ.setdefault("CONSUMER_OTEL_PROTOCOL", "http/json")
-
-    message, experiment_id = _create_dispatch_with_mock_agent()
+    message, experiment_id = _create_dispatch_with_mock_agent(settings=settings, options=options)
     _run_direct(message)
 
-    run_case = _poll_run_case(experiment_id, timeout_seconds=int(os.environ.get("ACCEPTANCE_TIMEOUT_SECONDS", "300")))
+    run_case = _poll_run_case(settings=settings, experiment_id=experiment_id, timeout_seconds=options.timeout_seconds)
     assert str(run_case.get("status") or "") == "success"
+    assert str(run_case.get("agent_output") or "").strip(), "agent_output is empty"
 
     trajectory_raw = run_case.get("agent_trajectory")
     assert trajectory_raw, "agent_trajectory is empty"
@@ -68,17 +88,12 @@ def test_mock_output_and_otel_trajectory_has_events() -> None:
     event_steps = [step for step in trajectory if isinstance(step, dict) and isinstance(step.get("events"), list) and step.get("events")]
     assert event_steps, f"no trajectory step contains non-empty events, got={trajectory}"
     assert _trajectory_has_io_fields(trajectory), f"trajectory missing realistic step input/output fields, got={trajectory}"
-
-
-def _mysql_password() -> str:
-    return (os.environ.get("MYSQL_PASSWORD") or "").strip('"')
-
-
-def _must_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"missing required env: {name}")
-    return value
+    assert _run_case_has_non_empty_trace_service(settings=settings, run_case_id=int(run_case["id"])), (
+        f"trace service is empty for run_case_id={run_case['id']}"
+    )
+    assert _run_case_has_otel_logs(settings=settings, run_case_id=int(run_case["id"])), (
+        f"otel_logs missing for run_case_id={run_case['id']}"
+    )
 
 
 def _dict_cursor_class() -> Any:
@@ -92,86 +107,78 @@ def _require_row(name: str, row: Any) -> dict[str, Any]:
     return cast(dict[str, Any], row)
 
 
-def _mock_runtime_spec() -> dict[str, Any]:
-    case_exec_command = """
-NOW_NS=$(($(date +%s)*1000000000));
-MID1_NS=$((NOW_NS+150000000));
-MID2_NS=$((NOW_NS+320000000));
-END_NS=$((NOW_NS+520000000));
-USER_QUERY="${BENCHMARK_USER_INPUT}";
-if [ -z "${USER_QUERY}" ]; then
-  USER_QUERY="今天有哪些 AI 新闻";
-fi;
-PAYLOAD=$(cat <<EOF
-{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"${OTEL_SERVICE_NAME}"}},{"key":"benchmark.run_case_id","value":{"stringValue":"${BENCHMARK_RUN_CASE_ID}"}},{"key":"benchmark.data_item_id","value":{"stringValue":"${BENCHMARK_DATA_ITEM_ID}"}}]},"scopeSpans":[{"scope":{"name":"mock.agent"},"spans":[{"traceId":"71699f4302d7e3f3b2b67c8ef2ad64f1","spanId":"8f5b9a0d31d6a5ff","name":"web_search","startTimeUnixNano":"${NOW_NS}","endTimeUnixNano":"${MID1_NS}","status":{"code":"STATUS_CODE_OK"},"events":[{"name":"query.start","timeUnixNano":"${NOW_NS}","attributes":[{"key":"query","value":{"stringValue":"${USER_QUERY}"}},{"key":"top_k","value":{"intValue":"3"}}]},{"name":"query.result","timeUnixNano":"${MID1_NS}","attributes":[{"key":"results","value":{"stringValue":"[{\\\"title\\\":\\\"OpenAI release update\\\"},{\\\"title\\\":\\\"Anthropic enterprise agents\\\"},{\\\"title\\\":\\\"Cloud vendors launch eval suites\\\"}]"}}]}],"attributes":[{"key":"tool.name","value":{"stringValue":"web_search"}},{"key":"search.query","value":{"stringValue":"${USER_QUERY}"}}]},{"traceId":"71699f4302d7e3f3b2b67c8ef2ad64f1","spanId":"7a4b3c2d1e0f9a88","parentSpanId":"8f5b9a0d31d6a5ff","name":"file_read","startTimeUnixNano":"${MID1_NS}","endTimeUnixNano":"${MID2_NS}","status":{"code":"STATUS_CODE_OK"},"events":[{"name":"file.open","timeUnixNano":"${MID1_NS}","attributes":[{"key":"path","value":{"stringValue":"/workspace/news/ai_news_digest.json"}}]},{"name":"file.parsed","timeUnixNano":"${MID2_NS}","attributes":[{"key":"content_preview","value":{"stringValue":"Top stories: model upgrades, enterprise adoption, tooling maturity"}}]}],"attributes":[{"key":"tool.name","value":{"stringValue":"file_read"}},{"key":"file.path","value":{"stringValue":"/workspace/news/ai_news_digest.json"}}]},{"traceId":"71699f4302d7e3f3b2b67c8ef2ad64f1","spanId":"55aa33bb77cc11dd","parentSpanId":"7a4b3c2d1e0f9a88","name":"answer.compose","startTimeUnixNano":"${MID2_NS}","endTimeUnixNano":"${END_NS}","status":{"code":"STATUS_CODE_OK"},"events":[{"name":"draft.start","timeUnixNano":"${MID2_NS}","attributes":[{"key":"model","value":{"stringValue":"mock-kimi-k2.5"}}]},{"name":"draft.finish","timeUnixNano":"${END_NS}","attributes":[{"key":"final_answer","value":{"stringValue":"今天 AI 新闻聚焦在模型升级、企业级 Agent 能力增强以及评测工具链完善。"}}]}],"attributes":[{"key":"tool.name","value":{"stringValue":"llm.compose"}},{"key":"model.name","value":{"stringValue":"mock-kimi-k2.5"}}]}]}]}]}
-EOF
-);
-curl -sS -X POST "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}" -H "Content-Type: application/json" --data "${PAYLOAD}" >/dev/null;
-printf "{\\"output\\":{\\"question\\":\\"%s\\",\\"headlines\\":[\\"OpenAI 发布新推理模型更新\\",\\"Anthropic 发布企业级代理能力增强\\",\\"多家云厂商上线 AI Agent 评测套件\\"],\\"summary\\":\\"今日 AI 新闻主要集中在模型能力升级与 Agent 工具链完善。\\"}}\\n" "${USER_QUERY}"
-""".strip()
-    return {
-        "runtime_type": "mock_output_otel",
-        "agent_image": "curlimages/curl:8.7.1",
-        "pull_policy": "if-not-present",
-        "sandbox_start_command": "sleep 300",
-        "case_exec_command": case_exec_command,
-        "startup_timeout_seconds": 30,
-        "startup_poll_interval_seconds": 1,
-        "agent_env_template": {},
-    }
-
-
-def _create_dispatch_with_mock_agent() -> tuple[dict[str, Any], int]:
-    import pymysql  # type: ignore[import-not-found]
+def _create_dispatch_with_mock_agent(*, settings: Settings, options: E2EOptions) -> tuple[dict[str, Any], int]:
+    mysql_server = settings.mysql_server
+    mysql_user = settings.mysql_user
+    mysql_db = settings.mysql_db
+    if not mysql_server or not mysql_user or not mysql_db:
+        raise RuntimeError("missing mysql settings")
 
     conn = pymysql.connect(
-        host=_must_env("MYSQL_SERVER"),
-        port=int(os.environ.get("MYSQL_PORT", "3306")),
-        user=_must_env("MYSQL_USER"),
-        password=_mysql_password(),
-        database=_must_env("MYSQL_DB"),
+        host=mysql_server,
+        port=settings.mysql_port,
+        user=mysql_user,
+        password=(settings.mysql_password or "").strip('"'),
+        database=mysql_db,
         autocommit=False,
         cursorclass=_dict_cursor_class(),
     )
 
     try:
         with conn.cursor() as cur:
-            runtime_spec = _mock_runtime_spec()
-            cur.execute(
-                """
-                INSERT INTO agents
-                (agent_key, version, name, description, docker_image, openapi_spec, status, metadata, runtime_spec_json,
-                 created_by, updated_by, created_at, updated_at, is_deleted, deleted_at)
-                VALUES (%s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, NULL)
-                ON DUPLICATE KEY UPDATE
-                  name = VALUES(name),
-                  description = VALUES(description),
-                  docker_image = VALUES(docker_image),
-                  runtime_spec_json = VALUES(runtime_spec_json),
-                  updated_by = VALUES(updated_by),
-                  updated_at = CURRENT_TIMESTAMP,
-                  is_deleted = 0,
-                  deleted_at = NULL
-                """,
-                (
-                    MOCK_AGENT_KEY,
-                    MOCK_AGENT_VERSION,
-                    "mock-output-and-otel",
-                    "mock agent emits output and otel spans with events",
-                    "curlimages/curl:8.7.1",
-                    json.dumps({}, ensure_ascii=False),
-                    json.dumps({}, ensure_ascii=False),
-                    json.dumps(runtime_spec, ensure_ascii=False),
-                    "e2e-test",
-                    "e2e-test",
-                ),
-            )
-
-            cur.execute(
-                "SELECT id, name, agent_key, version, runtime_spec_json FROM agents WHERE agent_key = %s AND version = %s AND deleted_at IS NULL",
-                (MOCK_AGENT_KEY, MOCK_AGENT_VERSION),
-            )
-            agent = _require_row("agent", cur.fetchone())
+            agent: dict[str, Any] | None = None
+            if MOCK_AGENT_KEY and MOCK_AGENT_VERSION:
+                cur.execute(
+                    """
+                    SELECT id, name, agent_key, version, runtime_spec_json
+                    FROM agents
+                    WHERE deleted_at IS NULL
+                      AND agent_key = %s
+                      AND version = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (MOCK_AGENT_KEY, MOCK_AGENT_VERSION),
+                )
+                row = cur.fetchone()
+                if isinstance(row, dict) and row:
+                    agent = cast(dict[str, Any], row)
+            if agent is None and MOCK_AGENT_KEY:
+                cur.execute(
+                    """
+                    SELECT id, name, agent_key, version, runtime_spec_json
+                    FROM agents
+                    WHERE deleted_at IS NULL
+                      AND agent_key = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (MOCK_AGENT_KEY,),
+                )
+                row = cur.fetchone()
+                if isinstance(row, dict) and row:
+                    agent = cast(dict[str, Any], row)
+            if agent is None and MOCK_AGENT_NAME:
+                cur.execute(
+                    """
+                    SELECT id, name, agent_key, version, runtime_spec_json
+                    FROM agents
+                    WHERE deleted_at IS NULL
+                      AND name = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (MOCK_AGENT_NAME,),
+                )
+                row = cur.fetchone()
+                if isinstance(row, dict) and row:
+                    agent = cast(dict[str, Any], row)
+            agent = _require_row("agent", agent)
+            runtime_spec = agent.get("runtime_spec_json")
+            if isinstance(runtime_spec, str):
+                runtime_spec = json.loads(runtime_spec)
+            if not isinstance(runtime_spec, dict):
+                raise RuntimeError("mock-output-and-otel agent runtime_spec_json is invalid")
 
             cur.execute("SELECT id, name FROM datasets WHERE deleted_at IS NULL ORDER BY id ASC LIMIT 1")
             dataset = _require_row("dataset", cur.fetchone())
@@ -187,10 +194,9 @@ def _create_dispatch_with_mock_agent() -> tuple[dict[str, Any], int]:
             evaluators = [cast(dict[str, Any], row) for row in (cur.fetchall() or [])]
             if not evaluators:
                 raise RuntimeError("no evaluator with non-empty api_key available")
-            max_evaluators = max(1, int(os.environ.get("ACCEPTANCE_MAX_EVALUATORS", "1")))
-            if len(evaluators) > max_evaluators:
-                rng = random.Random(int(os.environ.get("ACCEPTANCE_RANDOM_SEED", "20260228")))
-                evaluators = rng.sample(evaluators, max_evaluators)
+            if len(evaluators) > options.max_evaluators:
+                rng = random.Random(options.random_seed)
+                evaluators = rng.sample(evaluators, options.max_evaluators)
 
             cur.execute(
                 """
@@ -204,12 +210,10 @@ def _create_dispatch_with_mock_agent() -> tuple[dict[str, Any], int]:
             items = [cast(dict[str, Any], row) for row in (cur.fetchall() or [])]
             if not items:
                 raise RuntimeError(f"no data_items for dataset={dataset['id']}")
-            max_data_items = max(1, int(os.environ.get("ACCEPTANCE_MAX_DATA_ITEMS", "1")))
-            if len(items) > max_data_items:
-                rng = random.Random(int(os.environ.get("ACCEPTANCE_RANDOM_SEED", "20260228")))
-                items = rng.sample(items, max_data_items)
+            if len(items) > options.max_data_items:
+                rng = random.Random(options.random_seed)
+                items = rng.sample(items, options.max_data_items)
 
-            created_by = os.environ.get("ACCEPTANCE_CREATED_BY", "e2e-test")
             exp_name = f"测试-otel-events-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             cur.execute(
                 """
@@ -217,7 +221,7 @@ def _create_dispatch_with_mock_agent() -> tuple[dict[str, Any], int]:
                 (name, dataset_id, agent_id, queue_status, queued_at, created_by, updated_by, created_at, updated_at)
                 VALUES (%s, %s, %s, 'test_case', CURRENT_TIMESTAMP, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (exp_name, int(dataset["id"]), int(agent["id"]), created_by, created_by),
+                (exp_name, int(dataset["id"]), int(agent["id"]), options.created_by, options.created_by),
             )
             experiment_id = int(cur.lastrowid)
 
@@ -312,44 +316,103 @@ def _run_direct(message_payload: dict[str, Any]) -> None:
         inspect_timeout_seconds=settings.docker_inspect_timeout_seconds,
     )
 
-    collector: OTelCollectorServer | None = None
-    if settings.otel_enabled and settings.otel_collector_enabled:
-        trace_sink = TraceIngestRepository.from_settings(settings)
-        span_store = OTelSpanStore(sink=trace_sink)
-        collector = OTelCollectorServer(
-            host=settings.otel_collector_host,
-            port=settings.otel_collector_port,
-            path=settings.otel_collector_path,
-            store=span_store,
-        )
-        trajectory_source = span_store
-    else:
-        trajectory_source = TraceRepository.from_settings(settings)
-
-    inspect_runner = InspectRunner(runner, settings=settings, trace_repository=trajectory_source)
+    inspect_runner = InspectRunner(runner, settings=settings)
     db = DbRepository.from_settings(settings)
     processor = MessageProcessor(settings=settings, runner=inspect_runner, lock=_NoopLock(), db=db)
 
-    message = parse_message(message_payload)
-    if collector:
-        collector.start()
+    body = json.dumps(message_payload, ensure_ascii=False).encode("utf-8")
+    processor.handle_raw_message(body)
+
+
+def _run_case_has_non_empty_trace_service(*, settings: Settings, run_case_id: int) -> bool:
+    mysql_server = settings.mysql_server
+    mysql_user = settings.mysql_user
+    mysql_db = settings.mysql_db
+    if not mysql_server or not mysql_user or not mysql_db:
+        raise RuntimeError("missing mysql settings")
+
+    conn = pymysql.connect(
+        host=mysql_server,
+        port=settings.mysql_port,
+        user=mysql_user,
+        password=(settings.mysql_password or "").strip('"'),
+        database=mysql_db,
+        autocommit=True,
+        cursorclass=_dict_cursor_class(),
+    )
     try:
-        processor._execute_cases(message)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  service_name AS svc
+                FROM otel_traces
+                WHERE is_deleted = 0
+                  AND run_case_id = %s
+                ORDER BY id ASC
+                """,
+                (int(run_case_id),),
+            )
+            rows = cur.fetchall() or []
+            if not rows:
+                return False
+            for row in rows:
+                if isinstance(row, dict) and str(row.get("svc") or "").strip():
+                    return True
+            return False
     finally:
-        if collector:
-            collector.stop()
+        conn.close()
 
 
-def _poll_run_case(experiment_id: int, timeout_seconds: int) -> dict[str, Any]:
+def _run_case_has_otel_logs(*, settings: Settings, run_case_id: int) -> bool:
+    mysql_server = settings.mysql_server
+    mysql_user = settings.mysql_user
+    mysql_db = settings.mysql_db
+    if not mysql_server or not mysql_user or not mysql_db:
+        raise RuntimeError("missing mysql settings")
+
+    conn = pymysql.connect(
+        host=mysql_server,
+        port=settings.mysql_port,
+        user=mysql_user,
+        password=(settings.mysql_password or "").strip('"'),
+        database=mysql_db,
+        autocommit=True,
+        cursorclass=_dict_cursor_class(),
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM otel_logs
+                WHERE is_deleted = 0
+                  AND run_case_id = %s
+                """,
+                (int(run_case_id),),
+            )
+            row = _require_row("otel_logs", cur.fetchone())
+            return int(row.get("c") or 0) > 0
+    finally:
+        conn.close()
+
+
+def _poll_run_case(*, settings: Settings, experiment_id: int, timeout_seconds: int) -> dict[str, Any]:
     import pymysql  # type: ignore[import-not-found]
+
+    mysql_server = settings.mysql_server
+    mysql_user = settings.mysql_user
+    mysql_db = settings.mysql_db
+    if not mysql_server or not mysql_user or not mysql_db:
+        raise RuntimeError("missing mysql settings")
 
     deadline = time.time() + timeout_seconds
     conn = pymysql.connect(
-        host=_must_env("MYSQL_SERVER"),
-        port=int(os.environ.get("MYSQL_PORT", "3306")),
-        user=_must_env("MYSQL_USER"),
-        password=_mysql_password(),
-        database=_must_env("MYSQL_DB"),
+        host=mysql_server,
+        port=settings.mysql_port,
+        user=mysql_user,
+        password=(settings.mysql_password or "").strip('"'),
+        database=mysql_db,
         autocommit=True,
         cursorclass=_dict_cursor_class(),
     )

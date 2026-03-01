@@ -12,16 +12,13 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Callable
 
-from domain.otel_mapper import map_spans_to_trajectory
 from domain.contracts import CaseExecutionResult, ExperimentRunRequested, RunCaseInput
 from infrastructure.config import Settings
 from infrastructure.docker_runner import DockerRunner
-from infrastructure.mock_sidecar import start_mock_sidecar
+from infrastructure.mock_gateway.runtime import start_mock_gateway
 from runtime.evaluator_client import EvaluatorCallInput, call_evaluator
 
 logger = logging.getLogger(__name__)
@@ -42,13 +39,9 @@ class InspectRunner:
     for all run_cases. Each case executes in order and then issues a reset command.
     """
 
-    def __init__(self, docker_runner: DockerRunner, settings: Settings, trace_repository: Any) -> None:
+    def __init__(self, docker_runner: DockerRunner, settings: Settings) -> None:
         self.docker_runner = docker_runner
         self.settings = settings
-        self.trace_repository = trace_repository
-        self._otel_enabled = bool(settings.otel_enabled)
-        self._otel_endpoint = self._resolve_otel_endpoint(settings)
-        self._otel_query_timeout_seconds = max(1, int(settings.otel_query_timeout_seconds))
         self._scorer_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, int(settings.scorer_concurrent_cases)),
             thread_name_prefix="scorer",
@@ -62,12 +55,6 @@ class InspectRunner:
                 sys.executable,
                 max(1, int(settings.scorer_concurrent_cases)),
             )
-            if self._otel_enabled:
-                logger.info(
-                    "code=OTEL_ENABLED endpoint=%s query_timeout_seconds=%s",
-                    self._otel_endpoint,
-                    self._otel_query_timeout_seconds,
-                )
         else:
             logger.error(
                 "code=E_INSPECT_AI_UNAVAILABLE python=%s executable=%s err=%s",
@@ -107,16 +94,30 @@ class InspectRunner:
             "generated_at": int(time.time()),
         }
 
-    def run_case(self, message: ExperimentRunRequested, run_case: RunCaseInput) -> CaseExecutionResult:
-        return self.run_cases(message, [run_case])[run_case.run_case_id]
+    def run_case(
+        self,
+        message: ExperimentRunRequested,
+        run_case: RunCaseInput,
+        progress_callback: Callable[[int, str], None] | None = None,
+    ) -> CaseExecutionResult:
+        return self.run_cases(message, [run_case], progress_callback=progress_callback)[run_case.run_case_id]
 
-    def run_cases(self, message: ExperimentRunRequested, run_cases: list[RunCaseInput]) -> dict[int, CaseExecutionResult]:
+    def run_cases(
+        self,
+        message: ExperimentRunRequested,
+        run_cases: list[RunCaseInput],
+        progress_callback: Callable[[int, str], None] | None = None,
+    ) -> dict[int, CaseExecutionResult]:
         started = time.time()
         if not self._has_inspect_ai:
             return self._failed_without_inspect(run_cases)
 
         try:
-            return self._run_inspect_eval_batch(message=message, run_cases=run_cases)
+            return self._run_inspect_eval_batch(
+                message=message,
+                run_cases=run_cases,
+                progress_callback=progress_callback,
+            )
         except Exception as exc:
             logger.warning("code=E_INSPECT_EVAL_FAILED err=%s", exc)
             failed: dict[int, CaseExecutionResult] = {}
@@ -164,6 +165,7 @@ class InspectRunner:
         *,
         message: ExperimentRunRequested,
         run_cases: list[RunCaseInput],
+        progress_callback: Callable[[int, str], None] | None,
     ) -> dict[int, CaseExecutionResult]:
         batch_started = time.time()
         logger.info(
@@ -197,6 +199,7 @@ class InspectRunner:
         case_exec_command = str(runtime_spec.get("case_exec_command") or "").strip()
         if not case_exec_command:
             raise RuntimeError("E_RUNTIME_SPEC_CASE_EXEC_REQUIRED: agent.runtime_spec_json.case_exec_command")
+        after_exec_command = str(runtime_spec.get("after_exec_command") or "").strip()
 
         case_map = {rc.run_case_id: rc for rc in run_cases}
         execution: dict[int, dict[str, Any]] = {
@@ -212,7 +215,6 @@ class InspectRunner:
                 "latency_ms": 0,
                 "sandbox_connect_ms": 0,
                 "case_exec_ms": 0,
-                "otel_query_ms": 0,
                 "scorer_total_ms": 0,
                 "scorer_timings_ms": {},
             }
@@ -224,6 +226,8 @@ class InspectRunner:
             "updated_at": time.time(),
             "started_at": time.time(),
         }
+        case_semaphore = asyncio.Semaphore(max(1, int(self.settings.concurrent_cases)))
+        score_semaphore = asyncio.Semaphore(max(1, int(self.settings.scorer_concurrent_cases)))
         execution_lock = threading.Lock()
         hb_stop = threading.Event()
 
@@ -231,6 +235,8 @@ class InspectRunner:
             progress["phase"] = phase
             progress["run_case_id"] = run_case_id
             progress["updated_at"] = time.time()
+            if run_case_id is not None and progress_callback is not None:
+                progress_callback(run_case_id, phase)
 
         def _heartbeat() -> None:
             while not hb_stop.wait(INSPECT_HEARTBEAT_SECONDS):
@@ -264,13 +270,11 @@ class InspectRunner:
             async def solve(state, generate):
                 del generate
                 raw_run_case_id = (state.metadata or {}).get("run_case_id")
-                run_case_id = int(raw_run_case_id)
+                run_case_id = int(raw_run_case_id)  # pyright: ignore[reportArgumentType]
                 run_case = case_map[run_case_id]
-                sidecar = start_mock_sidecar(run_case.mock_config)
-                mock_base_url = sidecar.endpoint if sidecar else None
-                execution[run_case_id]["mock_sidecar_endpoint"] = mock_base_url or ""
-
+                await case_semaphore.acquire()
                 try:
+                    mock_base_url = str(execution[run_case_id].get("mock_sidecar_endpoint") or "") or None
                     case_started = time.time()
                     case_started_ms = int(case_started * 1000)
                     _update_progress("sandbox_connect", run_case_id)
@@ -290,37 +294,46 @@ class InspectRunner:
                         case_env=case_env,
                         runtime_spec=runtime_spec,
                     )
+                    after_exec_result = None
+                    after_exec_logs = ""
+                    if after_exec_command:
+                        _update_progress("after_exec", run_case_id)
+                        after_exec_result, after_exec_logs = await self._exec_after_case_command(
+                            sb=sb,
+                            after_exec_command=after_exec_command,
+                            case_env=case_env,
+                        )
                     case_exec_ms = int((time.time() - case_exec_started) * 1000)
                     execution[run_case_id]["case_exec_ms"] = case_exec_ms
                     container_logs = self._docker_container_logs(execution[run_case_id]["container_name"])
+                    combined_logs = raw_logs
+                    if after_exec_logs:
+                        combined_logs = f"{combined_logs}\n\n[after-exec]\n{after_exec_logs}".strip()
                     parsed = self._parse_agent_output(raw_logs)
                     output, trajectory = self._normalize_case_result_payload(parsed, exec_result.stdout)
-                    case_finished_ms = int(time.time() * 1000)
-                    _update_progress("otel_query", run_case_id)
-                    otel_query_started = time.time()
-                    trajectory = self._resolve_trajectory(
-                        message=message,
-                        run_case=run_case,
-                        run_case_id=run_case_id,
-                        started_ms=case_started_ms,
-                        finished_ms=case_finished_ms,
-                        fallback_trajectory=trajectory,
-                    )
-                    execution[run_case_id]["otel_query_ms"] = int((time.time() - otel_query_started) * 1000)
-                    logs = str(parsed.get("logs")) if parsed and parsed.get("logs") else raw_logs
+                    logs = str(parsed.get("logs")) if parsed and parsed.get("logs") else combined_logs
                     if container_logs:
                         logs = f"{logs}\n\n[container]\n{container_logs}".strip()
+                    final_exit_code = (
+                        after_exec_result.returncode
+                        if exec_result.returncode == 0 and after_exec_result is not None
+                        else exec_result.returncode
+                    )
+                    if exec_result.returncode == 0 and after_exec_result is not None and after_exec_result.returncode != 0:
+                        error_message = f"E_AFTER_EXEC_NON_ZERO: exit code {after_exec_result.returncode}"
+                    elif exec_result.returncode == 0:
+                        error_message = ""
+                    else:
+                        error_message = f"E_AGENT_EXIT_NON_ZERO: exit code {exec_result.returncode}"
 
                     execution[run_case_id].update(
                         {
-                            "status": "success" if exec_result.returncode == 0 else "failed",
-                            "exit_code": exec_result.returncode,
+                            "status": "success" if final_exit_code == 0 else "failed",
+                            "exit_code": final_exit_code,
                             "logs": logs,
                             "trajectory": trajectory,
                             "output": output,
-                            "error_message": ""
-                            if exec_result.returncode == 0
-                            else f"E_AGENT_EXIT_NON_ZERO: exit code {exec_result.returncode}",
+                            "error_message": error_message,
                             "latency_ms": int((time.time() - case_started) * 1000),
                         }
                     )
@@ -332,8 +345,7 @@ class InspectRunner:
                     state.completed = True
                     return state
                 finally:
-                    if sidecar:
-                        sidecar.close()
+                    case_semaphore.release()
 
             return solve
 
@@ -357,13 +369,14 @@ class InspectRunner:
             ):
                 async def score_fn(state, target):
                     del target
-                    run_case_id = int((state.metadata or {}).get("run_case_id"))
+                    run_case_id = int((state.metadata or {}).get("run_case_id"))  # pyright: ignore[reportArgumentType]
                     staged = CaseExecutionResult(
                         run_case_id=run_case_id,
                         status=str(execution[run_case_id].get("status") or "failed"),
                         trajectory=execution[run_case_id].get("trajectory"),
                         output=execution[run_case_id].get("output"),
                     )
+                    await score_semaphore.acquire()
                     _update_progress("score_exec", run_case_id)
                     scorer_started = time.time()
                     job = self._scorer_executor.submit(
@@ -374,12 +387,38 @@ class InspectRunner:
                         scorer_meta,
                     )
                     try:
-                        value, reason, raw_result = await asyncio.wait_for(
-                            asyncio.wrap_future(job),
-                            timeout=max(1, int(self.settings.scorer_hard_timeout_seconds)),
-                        )
-                    except asyncio.TimeoutError:
-                        job.cancel()
+                        try:
+                            value, reason, raw_result = await asyncio.wait_for(
+                                asyncio.wrap_future(job),
+                                timeout=max(1, int(self.settings.scorer_hard_timeout_seconds)),
+                            )
+                        except asyncio.TimeoutError:
+                            job.cancel()
+                            scorer_ms = int((time.time() - scorer_started) * 1000)
+                            with execution_lock:
+                                timings = execution[run_case_id].setdefault("scorer_timings_ms", {})
+                                if isinstance(timings, dict):
+                                    timings[key] = scorer_ms
+                                execution[run_case_id]["scorer_total_ms"] = int(
+                                    execution[run_case_id].get("scorer_total_ms") or 0
+                                ) + scorer_ms
+                            logger.warning(
+                                "code=E_SCORER_TIMEOUT run_case_id=%s scorer_key=%s timeout_seconds=%s",
+                                run_case_id,
+                                key,
+                                self.settings.scorer_hard_timeout_seconds,
+                            )
+                            return Score(
+                                value=DEFAULT_SCORE_SENTINEL,
+                                answer="",
+                                explanation="E_SCORE_DEFAULT_SCORER_TIMEOUT",
+                                metadata={
+                                    "scorer_key": key,
+                                    "evaluator_id": int(scorer_meta.get("id") or 0),
+                                    "evaluator_name": str(scorer_meta.get("name") or key),
+                                    "raw_result": {"source": "default", "timeout": True},
+                                },
+                            )
                         scorer_ms = int((time.time() - scorer_started) * 1000)
                         with execution_lock:
                             timings = execution[run_case_id].setdefault("scorer_timings_ms", {})
@@ -388,47 +427,30 @@ class InspectRunner:
                             execution[run_case_id]["scorer_total_ms"] = int(
                                 execution[run_case_id].get("scorer_total_ms") or 0
                             ) + scorer_ms
-                        logger.warning(
-                            "code=E_SCORER_TIMEOUT run_case_id=%s scorer_key=%s timeout_seconds=%s",
-                            run_case_id,
-                            key,
-                            self.settings.scorer_hard_timeout_seconds,
-                        )
                         return Score(
-                            value=DEFAULT_SCORE_SENTINEL,
+                            value=value,
                             answer="",
-                            explanation="E_SCORE_DEFAULT_SCORER_TIMEOUT",
+                            explanation=reason,
                             metadata={
                                 "scorer_key": key,
                                 "evaluator_id": int(scorer_meta.get("id") or 0),
                                 "evaluator_name": str(scorer_meta.get("name") or key),
-                                "raw_result": {"source": "default", "timeout": True},
+                                "raw_result": raw_result,
                             },
                         )
-                    scorer_ms = int((time.time() - scorer_started) * 1000)
-                    with execution_lock:
-                        timings = execution[run_case_id].setdefault("scorer_timings_ms", {})
-                        if isinstance(timings, dict):
-                            timings[key] = scorer_ms
-                        execution[run_case_id]["scorer_total_ms"] = int(
-                            execution[run_case_id].get("scorer_total_ms") or 0
-                        ) + scorer_ms
-                    _update_progress("score_done", run_case_id)
-                    return Score(
-                        value=value,
-                        answer="",
-                        explanation=reason,
-                        metadata={
-                            "scorer_key": key,
-                            "evaluator_id": int(scorer_meta.get("id") or 0),
-                            "evaluator_name": str(scorer_meta.get("name") or key),
-                            "raw_result": raw_result,
-                        },
-                    )
+                    finally:
+                        _update_progress("score_done", run_case_id)
+                        score_semaphore.release()
 
                 return score_fn
 
             scorer_fns.append(runtime_scorer_factory())
+
+        prestarted_sidecars: dict[int, Any] = {}
+        for rc in run_cases:
+            sidecar = start_mock_gateway(rc.mock_config)
+            prestarted_sidecars[rc.run_case_id] = sidecar
+            execution[rc.run_case_id]["mock_sidecar_endpoint"] = sidecar.endpoint if sidecar else ""
 
         samples = [
             Sample(
@@ -441,7 +463,14 @@ class InspectRunner:
                     "trace_id": rc.trace_id or "",
                     "session_jsonl": rc.session_jsonl,
                     "runtime_spec_json": json.dumps(runtime_spec, ensure_ascii=False),
-                    "case_env_json": json.dumps(self._build_case_env(message, rc, None), ensure_ascii=False),
+                    "case_env_json": json.dumps(
+                        self._build_case_env(
+                            message,
+                            rc,
+                            str(execution[rc.run_case_id].get("mock_sidecar_endpoint") or "") or None,
+                        ),
+                        ensure_ascii=False,
+                    ),
                 },
             )
             for rc in run_cases
@@ -466,6 +495,9 @@ class InspectRunner:
                 log_dir=str(inspect_logs_dir),
             )
         finally:
+            for handle in prestarted_sidecars.values():
+                if handle:
+                    handle.close()
             hb_stop.set()
             hb_thread.join(timeout=1)
         if not logs:
@@ -529,7 +561,7 @@ class InspectRunner:
                 output=rec.get("output"),
                 logs=str(rec.get("logs") or ""),
                 error_message=str(rec.get("error_message") or ""),
-                exit_code=int(rec.get("exit_code") if rec.get("exit_code") is not None else 1),
+                exit_code=int(rec.get("exit_code") if rec.get("exit_code") is not None else 1),  # pyright: ignore[reportArgumentType]
                 latency_ms=int(rec.get("latency_ms") or 0),
                 container_id=str(rec.get("container_name") or ""),
                 container_image=image,
@@ -544,7 +576,6 @@ class InspectRunner:
             case_result.usage["timings_ms"] = {
                 "sandbox_connect": int(rec.get("sandbox_connect_ms") or 0),
                 "case_exec": int(rec.get("case_exec_ms") or 0),
-                "otel_query": int(rec.get("otel_query_ms") or 0),
                 "scorer_total": int(rec.get("scorer_total_ms") or 0),
                 "total": int(rec.get("latency_ms") or 0),
                 "scorer_breakdown": rec.get("scorer_timings_ms") or {},
@@ -591,6 +622,21 @@ class InspectRunner:
             )
             await asyncio.sleep(retry_interval_seconds)
 
+    async def _exec_after_case_command(
+        self,
+        *,
+        sb: Any,
+        after_exec_command: str,
+        case_env: dict[str, str],
+    ) -> tuple[Any, str]:
+        exec_result = await sb.exec(
+            ["sh", "-lc", after_exec_command],
+            env=case_env,
+            timeout=self.docker_runner.timeout_seconds,
+        )
+        raw_logs = f"{exec_result.stdout}\n{exec_result.stderr}".strip()
+        return exec_result, raw_logs
+
     def _build_case_env(
         self,
         message: ExperimentRunRequested,
@@ -616,162 +662,46 @@ class InspectRunner:
                     env[key] = str(value)
         if run_case.trace_id:
             env["BENCHMARK_TRACE_ID"] = run_case.trace_id
+        existing_resource_attrs = str(env.get("OTEL_RESOURCE_ATTRIBUTES") or "").strip()
+        injected_resource_attrs = ",".join(
+            [
+                f"benchmark.experiment_id={message.experiment.id}",
+                f"benchmark.run_case_id={run_case.run_case_id}",
+                f"benchmark.data_item_id={run_case.data_item_id}",
+            ]
+        )
+        env["OTEL_RESOURCE_ATTRIBUTES"] = (
+            f"{existing_resource_attrs},{injected_resource_attrs}"
+            if existing_resource_attrs
+            else injected_resource_attrs
+        )
+        existing_headers = str(env.get("OTEL_EXPORTER_OTLP_HEADERS") or "").strip()
+        injected_headers = ",".join(
+            [
+                f"x-benchmark-experiment-id={message.experiment.id}",
+                f"x-benchmark-run-case-id={run_case.run_case_id}",
+                f"x-benchmark-data-item-id={run_case.data_item_id}",
+            ]
+        )
+        merged_headers = f"{existing_headers},{injected_headers}" if existing_headers else injected_headers
+        env["OTEL_EXPORTER_OTLP_HEADERS"] = merged_headers
+        env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = merged_headers
         if mock_base_url:
-            env["BENCHMARK_MOCK_BASE_URL"] = mock_base_url
-        if self._otel_enabled:
-            endpoint_base, traces_endpoint = self._otel_exporter_endpoints()
-            env["OTEL_SERVICE_NAME"] = self._otel_service_name(message)
-            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint_base
-            env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = traces_endpoint
-            env["OTEL_EXPORTER_OTLP_PROTOCOL"] = self.settings.otel_protocol
-            env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = self.settings.otel_protocol
-            env["OTEL_TRACES_EXPORTER"] = "otlp"
-            env["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(
-                [
-                    f"benchmark.experiment_id={message.experiment.id}",
-                    f"benchmark.run_case_id={run_case.run_case_id}",
-                    f"benchmark.data_item_id={run_case.data_item_id}",
-                    f"benchmark.agent_id={message.agent.id}",
-                ]
-            )
+            env.update(self._build_mock_proxy_env(mock_base_url))
         return env
 
-    def _otel_service_name(self, message: ExperimentRunRequested) -> str:
-        if message.agent.name:
-            return message.agent.name
-        return f"{message.agent.agent_key}:{message.agent.version}"
-
-    def _resolve_otel_endpoint(self, settings: Settings) -> str:
-        explicit = str(settings.otel_public_endpoint or "").strip()
-        if explicit:
-            return explicit
-        if settings.otel_collector_enabled:
-            return f"http://host.docker.internal:{settings.otel_collector_port}{settings.otel_collector_path}"
-        fallback = str(settings.otel_endpoint or "").strip()
-        if fallback:
-            return fallback
-        return f"http://host.docker.internal:{settings.otel_collector_port}{settings.otel_collector_path}"
-
-    def _otel_exporter_endpoints(self) -> tuple[str, str]:
-        parsed = urlparse(self._otel_endpoint)
-        if parsed.scheme and parsed.netloc:
-            base = f"{parsed.scheme}://{parsed.netloc}"
-            path = parsed.path or "/v1/traces"
-            full = f"{base}{path}"
-            return base, full
-        return self._otel_endpoint, self._otel_endpoint
-
-    def _resolve_trajectory(
-        self,
-        *,
-        message: ExperimentRunRequested,
-        run_case: RunCaseInput,
-        run_case_id: int,
-        started_ms: int,
-        finished_ms: int,
-        fallback_trajectory: Any,
-    ) -> Any:
-        if not self._otel_enabled:
-            return fallback_trajectory
-        logger.info(
-            "code=OTEL_QUERY_START run_case_id=%s experiment_id=%s window_ms=%s-%s",
-            run_case_id,
-            message.experiment.id,
-            started_ms,
-            finished_ms,
-        )
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(
-                    self.trace_repository.fetch_spans_by_run_case,
-                    run_case_id=run_case_id,
-                    start_ms=started_ms,
-                    end_ms=finished_ms,
-                )
-                spans = future.result(timeout=self._otel_query_timeout_seconds)
-            if not spans:
-                fetch_window = getattr(self.trace_repository, "fetch_spans_by_time_window", None)
-                if callable(fetch_window):
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(
-                            fetch_window,
-                            start_ms=started_ms,
-                            end_ms=finished_ms,
-                            service_name=self._otel_service_name(message),
-                        )
-                        spans = future.result(timeout=self._otel_query_timeout_seconds)
-                    if spans:
-                        logger.info(
-                            "code=OTEL_QUERY_WINDOW_OK run_case_id=%s span_count=%s service_name=%s",
-                            run_case_id,
-                            len(spans),
-                            self._otel_service_name(message),
-                        )
-            if spans:
-                mapped = map_spans_to_trajectory(spans)
-                if mapped:
-                    logger.info("code=OTEL_QUERY_OK run_case_id=%s span_count=%s", run_case_id, len(spans))
-                    return mapped
-        except Exception as exc:
-            logger.warning("code=E_OTEL_QUERY_FAILED run_case_id=%s err=%s", run_case_id, exc)
-        synthetic = self._persist_synthetic_span(
-            message=message,
-            run_case=run_case,
-            started_ms=started_ms,
-            finished_ms=finished_ms,
-        )
-        if synthetic:
-            logger.info("code=OTEL_SYNTHETIC_SPAN_CREATED run_case_id=%s", run_case_id)
-            mapped = map_spans_to_trajectory([synthetic])
-            if mapped:
-                return mapped
-        logger.info("code=OTEL_FALLBACK_STDOUT run_case_id=%s", run_case_id)
-        return fallback_trajectory
-
-    def _persist_synthetic_span(
-        self,
-        *,
-        message: ExperimentRunRequested,
-        run_case: RunCaseInput,
-        started_ms: int,
-        finished_ms: int,
-    ) -> dict[str, Any] | None:
-        sink = getattr(self.trace_repository, "persist_spans", None)
-        if not callable(sink):
-            return None
-        now_ms = max(started_ms, finished_ms)
-        started = _iso_from_epoch_ms(started_ms or now_ms)
-        ended = _iso_from_epoch_ms(finished_ms or now_ms)
-        span = {
-            "trace_id": f"benchmark-{message.experiment.id}-{run_case.run_case_id}",
-            "span_id": uuid.uuid4().hex[:16],
-            "parent_span_id": None,
-            "name": "benchmark.case.exec",
-            "service_name": self._otel_service_name(message),
-            "attributes": {
-                "benchmark.synthetic": True,
-                "benchmark.experiment_id": message.experiment.id,
-                "benchmark.run_case_id": run_case.run_case_id,
-                "benchmark.data_item_id": run_case.data_item_id,
-                "benchmark.agent_id": message.agent.id,
-            },
-            "start_time": started,
-            "end_time": ended,
-            "status": "ok",
-            "raw": {
-                "name": "benchmark.case.exec",
-                "synthetic": True,
-                "start_time": started,
-                "end_time": ended,
-            },
-            "created_at": _iso_from_epoch_ms(now_ms),
+    def _build_mock_proxy_env(self, proxy_url: str) -> dict[str, str]:
+        no_proxy_value = "127.0.0.1,localhost,host.docker.internal"
+        return {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "ALL_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
+            "all_proxy": proxy_url,
+            "NO_PROXY": no_proxy_value,
+            "no_proxy": no_proxy_value,
         }
-        try:
-            sink([span])
-            return span
-        except Exception as exc:
-            logger.warning("code=E_OTEL_SYNTHETIC_SPAN_FAILED run_case_id=%s err=%s", run_case.run_case_id, exc)
-            return None
 
     def _parse_agent_output(self, raw_logs: str) -> dict[str, Any] | None:
         lines = [line.strip() for line in raw_logs.splitlines() if line.strip()]
@@ -966,8 +896,3 @@ class InspectRunner:
             except Exception:
                 return default
         return default
-
-
-def _iso_from_epoch_ms(value: int) -> str:
-    dt = datetime.fromtimestamp(max(0, value) / 1000.0, tz=timezone.utc)
-    return dt.isoformat()

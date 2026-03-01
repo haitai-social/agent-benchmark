@@ -13,18 +13,18 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from app.message_processor import MessageProcessor
-from domain.parser import parse_message
-from infrastructure.config import load_settings
+from infrastructure.config import Settings, load_settings
 from infrastructure.db_repository import DbRepository
 from infrastructure.docker_runner import DockerRunner
-from infrastructure.otel_collector import OTelCollectorServer, OTelSpanStore
-from infrastructure.trace_repository import TraceIngestRepository, TraceRepository
 from runtime.inspect_runner import InspectRunner
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+MOCK_AGENT_KEY = os.getenv("ACCEPTANCE_AGENT_KEY", "mock-output-and-otel")
+MOCK_AGENT_VERSION = os.getenv("ACCEPTANCE_AGENT_VERSION", "v1")
+MOCK_AGENT_NAME = os.getenv("ACCEPTANCE_AGENT_NAME", "mock-output-and-otel")
 
 
 @dataclass
@@ -43,8 +43,32 @@ class AcceptanceResult:
     null_final_scores: int
     negative_scores: int
     inspect_eval_count: int
+    trajectory_non_empty_cases: int
+    trace_rows: int
+    log_rows: int
     sample_output: Any
     sample_logs_head: str
+
+
+@dataclass(frozen=True)
+class AcceptanceOptions:
+    timeout_seconds: int
+    poll_interval_seconds: float
+    max_evaluators: int
+    max_data_items: int
+    random_seed: int
+    created_by: str
+
+
+def _load_acceptance_options() -> AcceptanceOptions:
+    return AcceptanceOptions(
+        timeout_seconds=max(1, int(os.getenv("ACCEPTANCE_TIMEOUT_SECONDS", "300"))),
+        poll_interval_seconds=max(0.5, float(os.getenv("ACCEPTANCE_POLL_INTERVAL_SECONDS", "3"))),
+        max_evaluators=max(1, int(os.getenv("ACCEPTANCE_MAX_EVALUATORS", "1"))),
+        max_data_items=max(1, int(os.getenv("ACCEPTANCE_MAX_DATA_ITEMS", "1"))),
+        random_seed=int(os.getenv("ACCEPTANCE_RANDOM_SEED", "20260228")),
+        created_by=os.getenv("ACCEPTANCE_CREATED_BY", "acceptance-script"),
+    )
 
 
 class _NoopLock:
@@ -64,17 +88,6 @@ class _NoopLock:
         return None
 
 
-def _mysql_password() -> str:
-    return (os.environ.get("MYSQL_PASSWORD") or "").strip('"')
-
-
-def _must_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"missing required env: {name}")
-    return value
-
-
 def _require_row(name: str, row: Any) -> dict[str, Any]:
     if not isinstance(row, dict):
         raise RuntimeError(f"{name} query did not return dict row")
@@ -86,18 +99,24 @@ def _dict_cursor_class() -> Any:
     return getattr(cursors_module, "DictCursor")
 
 
-def _create_dispatch() -> tuple[int, int, int, str, dict[str, Any]]:
+def _create_dispatch(settings: Settings, options: AcceptanceOptions) -> tuple[int, int, int, str, dict[str, Any]]:
     try:
         import pymysql  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("pymysql is required") from exc
 
+    mysql_server = settings.mysql_server
+    mysql_user = settings.mysql_user
+    mysql_db = settings.mysql_db
+    if not mysql_server or not mysql_user or not mysql_db:
+        raise RuntimeError("missing mysql settings")
+
     mysql_conn = pymysql.connect(
-        host=_must_env("MYSQL_SERVER"),
-        port=int(os.environ.get("MYSQL_PORT", "3306")),
-        user=_must_env("MYSQL_USER"),
-        password=_mysql_password(),
-        database=_must_env("MYSQL_DB"),
+        host=mysql_server,
+        port=settings.mysql_port,
+        user=mysql_user,
+        password=(settings.mysql_password or "").strip('"'),
+        database=mysql_db,
         autocommit=False,
         cursorclass=_dict_cursor_class(),
     )
@@ -114,13 +133,19 @@ def _create_dispatch() -> tuple[int, int, int, str, dict[str, Any]]:
                 SELECT id, name, agent_key, version, runtime_spec_json
                 FROM agents
                 WHERE deleted_at IS NULL
+                  AND (
+                    (agent_key = %s AND version = %s)
+                    OR name = %s
+                  )
                 ORDER BY id ASC
                 LIMIT 1
                 """
+                ,
+                (MOCK_AGENT_KEY, MOCK_AGENT_VERSION, MOCK_AGENT_NAME),
             )
             agent = _require_row("agent", cur.fetchone() or {})
             if not agent:
-                raise RuntimeError("no agent available")
+                raise RuntimeError("mock-output-and-otel agent is missing")
 
             cur.execute(
                 """
@@ -134,10 +159,9 @@ def _create_dispatch() -> tuple[int, int, int, str, dict[str, Any]]:
             evaluators = [cast(dict[str, Any], row) for row in (cur.fetchall() or [])]
             if not evaluators:
                 raise RuntimeError("no evaluator with non-empty api_key available")
-            max_evaluators = max(1, int(os.environ.get("ACCEPTANCE_MAX_EVALUATORS", "1")))
-            if len(evaluators) > max_evaluators:
-                rng = random.Random(int(os.environ.get("ACCEPTANCE_RANDOM_SEED", "20260228")))
-                evaluators = rng.sample(evaluators, max_evaluators)
+            if len(evaluators) > options.max_evaluators:
+                rng = random.Random(options.random_seed)
+                evaluators = rng.sample(evaluators, options.max_evaluators)
 
             cur.execute(
                 """
@@ -151,12 +175,10 @@ def _create_dispatch() -> tuple[int, int, int, str, dict[str, Any]]:
             items = [cast(dict[str, Any], row) for row in (cur.fetchall() or [])]
             if not items:
                 raise RuntimeError(f"no data_items for dataset={dataset['id']}")
-            max_data_items = max(1, int(os.environ.get("ACCEPTANCE_MAX_DATA_ITEMS", "1")))
-            if len(items) > max_data_items:
-                rng = random.Random(int(os.environ.get("ACCEPTANCE_RANDOM_SEED", "20260228")))
-                items = rng.sample(items, max_data_items)
+            if len(items) > options.max_data_items:
+                rng = random.Random(options.random_seed)
+                items = rng.sample(items, options.max_data_items)
 
-            created_by = os.environ.get("ACCEPTANCE_CREATED_BY", "acceptance-script")
             exp_name = f"验收-direct-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             cur.execute(
                 """
@@ -164,7 +186,7 @@ def _create_dispatch() -> tuple[int, int, int, str, dict[str, Any]]:
                 (name, dataset_id, agent_id, queue_status, queued_at, created_by, updated_by, created_at, updated_at)
                 VALUES (%s, %s, %s, 'test_case', CURRENT_TIMESTAMP, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (exp_name, int(dataset["id"]), int(agent["id"]), created_by, created_by),
+                (exp_name, int(dataset["id"]), int(agent["id"]), options.created_by, options.created_by),
             )
             experiment_id = int(cur.lastrowid)
 
@@ -265,50 +287,41 @@ def _run_direct(message_payload: dict[str, Any]) -> None:
         inspect_timeout_seconds=settings.docker_inspect_timeout_seconds,
     )
 
-    collector: OTelCollectorServer | None = None
-    if settings.otel_enabled and settings.otel_collector_enabled:
-        trace_sink = TraceIngestRepository.from_settings(settings)
-        span_store = OTelSpanStore(sink=trace_sink)
-        collector = OTelCollectorServer(
-            host=settings.otel_collector_host,
-            port=settings.otel_collector_port,
-            path=settings.otel_collector_path,
-            store=span_store,
-        )
-        trajectory_source = span_store
-    else:
-        trajectory_source = TraceRepository.from_settings(settings)
-
-    inspect_runner = InspectRunner(runner, settings=settings, trace_repository=trajectory_source)
+    inspect_runner = InspectRunner(runner, settings=settings)
     db = DbRepository.from_settings(settings)
     processor = MessageProcessor(settings=settings, runner=inspect_runner, lock=_NoopLock(), db=db)
 
-    message = parse_message(message_payload)
-    if collector:
-        collector.start()
-    try:
-        processor._execute_cases(message)
-    finally:
-        if collector:
-            collector.stop()
+    body = json.dumps(message_payload, ensure_ascii=False).encode("utf-8")
+    processor.handle_raw_message(body)
 
 
-def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id: str) -> AcceptanceResult:
+def _poll(
+    settings: Settings,
+    options: AcceptanceOptions,
+    experiment_id: int,
+    total_cases: int,
+    evaluator_count: int,
+    message_id: str,
+) -> AcceptanceResult:
     try:
         import pymysql  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("pymysql is required") from exc
 
-    timeout_seconds = int(os.environ.get("ACCEPTANCE_TIMEOUT_SECONDS", "300"))
-    poll_interval_seconds = float(os.environ.get("ACCEPTANCE_POLL_INTERVAL_SECONDS", "3"))
-    deadline = time.time() + timeout_seconds
+    mysql_server = settings.mysql_server
+    mysql_user = settings.mysql_user
+    mysql_db = settings.mysql_db
+    if not mysql_server or not mysql_user or not mysql_db:
+        raise RuntimeError("missing mysql settings")
+
+    deadline = time.time() + options.timeout_seconds
 
     conn = pymysql.connect(
-        host=_must_env("MYSQL_SERVER"),
-        port=int(os.environ.get("MYSQL_PORT", "3306")),
-        user=_must_env("MYSQL_USER"),
-        password=_mysql_password(),
-        database=_must_env("MYSQL_DB"),
+        host=mysql_server,
+        port=settings.mysql_port,
+        user=mysql_user,
+        password=(settings.mysql_password or "").strip('"'),
+        database=mysql_db,
         autocommit=True,
         cursorclass=_dict_cursor_class(),
     )
@@ -352,10 +365,51 @@ def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id
                     )
                     evaluate_rows = int(_require_row("evaluate_rows", cur.fetchone() or {}).get("c") or 0)
                     cur.execute(
-                        "SELECT agent_output, logs FROM run_cases WHERE experiment_id = %s ORDER BY id ASC LIMIT 1",
+                        """
+                        SELECT id, agent_trajectory, agent_output, logs
+                        FROM run_cases
+                        WHERE experiment_id = %s
+                        ORDER BY id ASC
+                        LIMIT 1
+                        """,
                         (experiment_id,),
                     )
                     sample = _require_row("sample", cur.fetchone() or {})
+                    sample_run_case_id = int(sample.get("id") or 0)
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) AS c
+                        FROM run_cases
+                        WHERE experiment_id = %s
+                          AND agent_trajectory IS NOT NULL
+                          AND JSON_LENGTH(agent_trajectory) > 0
+                        """,
+                        (experiment_id,),
+                    )
+                    trajectory_non_empty_cases = int(_require_row("trajectory_non_empty", cur.fetchone() or {}).get("c") or 0)
+                    trace_rows = 0
+                    log_rows = 0
+                    if sample_run_case_id > 0:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS c
+                            FROM otel_traces
+                            WHERE is_deleted = 0
+                              AND run_case_id = %s
+                            """,
+                            (int(sample_run_case_id),),
+                        )
+                        trace_rows = int(_require_row("trace_rows", cur.fetchone() or {}).get("c") or 0)
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS c
+                            FROM otel_logs
+                            WHERE is_deleted = 0
+                              AND run_case_id = %s
+                            """,
+                            (int(sample_run_case_id),),
+                        )
+                        log_rows = int(_require_row("log_rows", cur.fetchone() or {}).get("c") or 0)
 
                     return AcceptanceResult(
                         ok=queue_status in {"done", "test_case"} and int(summary.get("failed_cases") or 0) == 0,
@@ -372,10 +426,13 @@ def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id
                         null_final_scores=int(summary.get("null_final_scores") or 0),
                         negative_scores=int(summary.get("negative_scores") or 0),
                         inspect_eval_count=int(summary.get("inspect_eval_count") or 0),
+                        trajectory_non_empty_cases=trajectory_non_empty_cases,
+                        trace_rows=trace_rows,
+                        log_rows=log_rows,
                         sample_output=sample.get("agent_output"),
                         sample_logs_head=str(sample.get("logs") or "")[:1200],
                     )
-            time.sleep(poll_interval_seconds)
+            time.sleep(options.poll_interval_seconds)
     finally:
         conn.close()
 
@@ -394,13 +451,18 @@ def _poll(experiment_id: int, total_cases: int, evaluator_count: int, message_id
         null_final_scores=total_cases,
         negative_scores=total_cases,
         inspect_eval_count=0,
+        trajectory_non_empty_cases=0,
+        trace_rows=0,
+        log_rows=0,
         sample_output=None,
         sample_logs_head="",
     )
 
 
 def main() -> int:
-    exp_id, total_cases, evaluator_count, message_id, message = _create_dispatch()
+    settings = load_settings()
+    options = _load_acceptance_options()
+    exp_id, total_cases, evaluator_count, message_id, message = _create_dispatch(settings, options)
     print(
         json.dumps(
             {
@@ -416,7 +478,7 @@ def main() -> int:
     )
 
     _run_direct(message)
-    result = _poll(exp_id, total_cases, evaluator_count, message_id)
+    result = _poll(settings, options, exp_id, total_cases, evaluator_count, message_id)
     print(
         json.dumps(
             {
@@ -435,6 +497,9 @@ def main() -> int:
                 "null_final_scores": result.null_final_scores,
                 "negative_scores": result.negative_scores,
                 "inspect_eval_count": result.inspect_eval_count,
+                "trajectory_non_empty_cases": result.trajectory_non_empty_cases,
+                "trace_rows": result.trace_rows,
+                "log_rows": result.log_rows,
                 "sample_output": result.sample_output,
                 "sample_logs_head": result.sample_logs_head,
             },
@@ -465,6 +530,17 @@ def main() -> int:
         return 1
     if result.inspect_eval_count != result.total_cases:
         print("some run_cases missing inspect_eval_id")
+        return 1
+    if result.trajectory_non_empty_cases < result.total_cases:
+        print(
+            f"some run_cases have empty trajectory: non_empty={result.trajectory_non_empty_cases} total={result.total_cases}"
+        )
+        return 1
+    if result.trace_rows <= 0:
+        print("sample run_case has no traces rows")
+        return 1
+    if result.log_rows <= 0:
+        print("sample run_case has no logs rows")
         return 1
     return 0
 

@@ -8,6 +8,7 @@ import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination
 import { parseSelectedIds } from "@/lib/form-ids";
 import { requireUser } from "@/lib/supabase-auth";
 import { FilterIcon, JudgeIcon, PlusIcon, SearchIcon } from "../components/icons";
+import { ExpandableTextCell } from "../components/expandable-text-cell";
 import { SubmitButton } from "../components/submit-button";
 import { TextareaWithFileUpload } from "../components/textarea-with-file-upload";
 
@@ -25,13 +26,6 @@ function normalizeApiStyle(raw: string) {
   const value = raw.trim().toLowerCase();
   if (value === "anthropic") return "anthropic";
   return "openai";
-}
-
-function maskApiKey(value: string) {
-  const v = value.trim();
-  if (!v) return "-";
-  if (v.length <= 8) return "****";
-  return `${v.slice(0, 4)}****${v.slice(-4)}`;
 }
 
 async function createEvaluator(formData: FormData) {
@@ -242,7 +236,6 @@ export default async function EvaluatorsPage({
       <section className="page-hero">
         <div className="breadcrumb">评测 &nbsp;/&nbsp; Evaluators</div>
         <h1>Evaluators</h1>
-        <p className="muted">LLM as Judge 评估器管理。四个预设评估器已通过数据库初始化脚本内置。</p>
       </section>
 
       <section className="toolbar-row">
@@ -296,14 +289,16 @@ export default async function EvaluatorsPage({
           <input type="hidden" name="page" value={page} />
           <input type="hidden" name="pageSize" value={pageSize} />
         </form>
-        <table>
+        <table className="evaluators-table">
           <thead>
             <tr>
               <th className="bulk-select-cell">选</th>
+              <th>ID</th>
               <th>名称</th>
               <th>Key</th>
-              <th>Base URL / Model</th>
-              <th>API</th>
+              <th>Base URL</th>
+              <th>Model</th>
+              <th>API Style</th>
               <th>Prompt 预览</th>
               <th>操作</th>
             </tr>
@@ -314,28 +309,22 @@ export default async function EvaluatorsPage({
                 <td className="bulk-select-cell">
                   <input type="checkbox" name="selectedIds" value={row.id} form={bulkDeleteFormId} aria-label={`选择 Evaluator ${row.id}`} />
                 </td>
-                <td>{row.name}</td>
+                <td><code>#{row.id}</code></td>
+                <td className="evaluator-name-cell">{row.name}</td>
                 <td>
                   <code>{row.evaluator_key}</code>
                 </td>
-                <td>
-                  <div>
-                    <code>{row.base_url}</code>
-                  </div>
-                  <div className="muted">
-                    <code>{row.model_name}</code>
-                  </div>
+                <td className="evaluator-endpoint-cell">
+                  <code>{row.base_url}</code>
                 </td>
-                <td>
-                  <div>
-                    <code>{row.api_style}</code>
-                  </div>
-                  <div className="muted">
-                    <code>{maskApiKey(row.api_key)}</code>
-                  </div>
+                <td className="evaluator-model-cell">
+                  <code>{row.model_name}</code>
                 </td>
-                <td>
-                  <div className="muted">{row.prompt_template.slice(0, 220)}...</div>
+                <td className="evaluator-api-cell">
+                  <code>{row.api_style}</code>
+                </td>
+                <td className="evaluator-prompt-cell">
+                  <ExpandableTextCell value={row.prompt_template} previewLength={220} className="evaluator-prompt-preview muted" />
                 </td>
                 <td>
                   <div className="row-actions">
@@ -458,9 +447,9 @@ export default async function EvaluatorsPage({
                   </label>
                   <input
                     name="baseUrl"
-                    placeholder="Base URL（如 https://ark.cn-beijing.volces.com/api/coding/v3）"
+                    placeholder="Base URL（如 https://ark.cn-beijing.volces.com/api/v3/chat/completions）"
                     required
-                    defaultValue={editingRow?.base_url ?? "https://ark.cn-beijing.volces.com/api/coding/v3"}
+                    defaultValue={editingRow?.base_url ?? "https://ark.cn-beijing.volces.com/api/v3/chat/completions"}
                   />
                 </div>
                 <div className="field-group">
@@ -480,7 +469,7 @@ export default async function EvaluatorsPage({
                     <span className="field-title required">API Style</span>
                     <span className="type-pill">Enum</span>
                   </label>
-                  <select name="apiStyle" defaultValue={editingRow?.api_style ?? "anthropic"} required>
+                  <select name="apiStyle" defaultValue={editingRow?.api_style ?? "openai"} required>
                     <option value="openai">openai</option>
                     <option value="anthropic">anthropic</option>
                   </select>

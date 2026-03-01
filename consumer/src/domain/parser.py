@@ -8,7 +8,9 @@ from .contracts import (
     ExperimentRef,
     ExperimentRunRequested,
     MockConfig,
-    MockRoute,
+    MockMatch,
+    MockResponse,
+    MockRule,
     RunCaseInput,
 )
 
@@ -23,19 +25,39 @@ def parse_message(payload: dict[str, Any]) -> ExperimentRunRequested:
         mock_cfg = rc.get("mock_config")
         parsed_mock = None
         if isinstance(mock_cfg, dict):
-            parsed_mock = MockConfig(
-                base_url=mock_cfg.get("base_url", ""),
-                headers=dict(mock_cfg.get("headers") or {}),
-                routes=[
-                    MockRoute(
-                        path=r["path"],
-                        method=r["method"],
-                        status_code=int(r["status_code"]),
-                        body=r.get("body", ""),
-                        headers=dict(r.get("headers") or {}),
+            rules: list[MockRule] = []
+            for raw_rule in (mock_cfg.get("rules") or []):
+                if not isinstance(raw_rule, dict):
+                    continue
+                raw_match = raw_rule.get("match") or {}
+                raw_response = raw_rule.get("response") or {}
+                if not isinstance(raw_match, dict) or not isinstance(raw_response, dict):
+                    continue
+                methods = raw_match.get("methods") or []
+                rules.append(
+                    MockRule(
+                        name=str(raw_rule.get("name") or ""),
+                        match=MockMatch(
+                            methods=[str(m).upper() for m in methods if str(m).strip()] if isinstance(methods, list) else [],
+                            url=str(raw_match.get("url")) if raw_match.get("url") else None,
+                            url_regex=str(raw_match.get("url_regex")) if raw_match.get("url_regex") else None,
+                            host=str(raw_match.get("host")) if raw_match.get("host") else None,
+                            path=str(raw_match.get("path")) if raw_match.get("path") else None,
+                            path_regex=str(raw_match.get("path_regex")) if raw_match.get("path_regex") else None,
+                        ),
+                        response=MockResponse(
+                            type=str(raw_response.get("type") or "json"),
+                            status=int(raw_response.get("status") or 200),
+                            headers={str(k): str(v) for k, v in dict(raw_response.get("headers") or {}).items()},
+                            json_body=raw_response.get("json"),
+                            text_body=str(raw_response.get("text") or ""),
+                            python_code=str(raw_response.get("python_code") or ""),
+                        ),
                     )
-                    for r in mock_cfg.get("routes", [])
-                ],
+                )
+            parsed_mock = MockConfig(
+                passthrough=bool(mock_cfg.get("passthrough", True)),
+                rules=rules,
             )
         run_cases.append(
             RunCaseInput(

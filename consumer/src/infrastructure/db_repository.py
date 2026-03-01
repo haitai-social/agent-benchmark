@@ -57,6 +57,26 @@ class DbRepository:
             return
         self._mark_cases_running_mysql(experiment_id=experiment_id, run_case_ids=run_case_ids)
 
+    def mark_cases_queued(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        if not run_case_ids:
+            return
+        if self.settings.database_engine == "postgres":
+            self._mark_cases_queued_postgres(experiment_id=experiment_id, run_case_ids=run_case_ids)
+            return
+        self._mark_cases_queued_mysql(experiment_id=experiment_id, run_case_ids=run_case_ids)
+
+    def mark_case_status(
+        self,
+        *,
+        experiment_id: int,
+        run_case_id: int,
+        status: str,
+    ) -> None:
+        if self.settings.database_engine == "postgres":
+            self._mark_case_status_postgres(experiment_id=experiment_id, run_case_id=run_case_id, status=status)
+            return
+        self._mark_case_status_mysql(experiment_id=experiment_id, run_case_id=run_case_id, status=status)
+
     def _get_experiment_queue_state_postgres(self, experiment_id: int) -> tuple[str | None, str | None]:
         try:
             import psycopg  # type: ignore
@@ -224,6 +244,51 @@ class DbRepository:
             conn.commit()
 
     def _mark_cases_running_postgres(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        self._update_case_status_postgres(
+            experiment_id=experiment_id,
+            run_case_ids=run_case_ids,
+            status="running",
+            allowed_from=["pending", "queued"],
+            set_started_at=True,
+        )
+
+    def _mark_cases_queued_postgres(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        self._update_case_status_postgres(
+            experiment_id=experiment_id,
+            run_case_ids=run_case_ids,
+            status="queued",
+            allowed_from=["pending"],
+        )
+
+    def _mark_case_status_postgres(self, *, experiment_id: int, run_case_id: int, status: str) -> None:
+        allowed_from: list[str] | None = None
+        set_started_at = False
+        if status == "running":
+            allowed_from = ["pending", "queued", "trajectory"]
+            set_started_at = True
+        elif status == "trajectory":
+            allowed_from = ["running", "scoring"]
+        elif status == "scoring":
+            allowed_from = ["running", "trajectory"]
+        self._update_case_status_postgres(
+            experiment_id=experiment_id,
+            run_case_ids=[run_case_id],
+            status=status,
+            allowed_from=allowed_from,
+            set_started_at=set_started_at,
+        )
+
+    def _update_case_status_postgres(
+        self,
+        *,
+        experiment_id: int,
+        run_case_ids: list[int],
+        status: str,
+        allowed_from: list[str] | None = None,
+        set_started_at: bool = False,
+    ) -> None:
+        if not run_case_ids:
+            return
         try:
             import psycopg  # type: ignore
         except Exception as exc:
@@ -239,19 +304,23 @@ class DbRepository:
             f"password={self.settings.postgres_password or ''} "
             f"dbname={self.settings.postgres_db}"
         )
+        started_at_sql = "\n                           , started_at = COALESCE(started_at, CURRENT_TIMESTAMP)" if set_started_at else ""
+        allowed_sql = " AND status = ANY(%s)" if allowed_from else ""
+        params: list[Any] = [status, experiment_id, run_case_ids]
+        if allowed_from:
+            params.append(allowed_from)
         with psycopg.connect(dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE run_cases
-                       SET status = 'running',
-                           started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                       SET status = %s{started_at_sql},
                            updated_at = CURRENT_TIMESTAMP
                      WHERE experiment_id = %s
                        AND id = ANY(%s)
-                       AND status = 'pending'
+                       {allowed_sql}
                     """,
-                    (experiment_id, run_case_ids),
+                    params,
                 )
                 self._refresh_experiment_status_postgres(cur, experiment_id)
             conn.commit()
@@ -265,8 +334,8 @@ class DbRepository:
             """
             SELECT
               COUNT(*) AS total_count,
-              SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
-              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+              SUM(CASE WHEN status IN ('running','trajectory','scoring') THEN 1 ELSE 0 END) AS running_count,
+              SUM(CASE WHEN status IN ('pending','queued') THEN 1 ELSE 0 END) AS pending_count,
               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
               SUM(CASE WHEN status IN ('failed', 'timeout') THEN 1 ELSE 0 END) AS failed_count
             FROM run_cases
@@ -402,11 +471,63 @@ class DbRepository:
             conn.close()
 
     def _mark_cases_running_mysql(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        self._update_case_status_mysql(
+            experiment_id=experiment_id,
+            run_case_ids=run_case_ids,
+            status="running",
+            allowed_from=["pending", "queued"],
+            set_started_at=True,
+        )
+
+    def _mark_cases_queued_mysql(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+        self._update_case_status_mysql(
+            experiment_id=experiment_id,
+            run_case_ids=run_case_ids,
+            status="queued",
+            allowed_from=["pending"],
+            set_started_at=False,
+        )
+
+    def _mark_case_status_mysql(self, *, experiment_id: int, run_case_id: int, status: str) -> None:
+        allowed_from: list[str] | None = None
+        set_started_at = False
+        if status == "running":
+            allowed_from = ["pending", "queued", "trajectory"]
+            set_started_at = True
+        elif status == "trajectory":
+            allowed_from = ["running", "scoring"]
+        elif status == "scoring":
+            allowed_from = ["running", "trajectory"]
+        self._update_case_status_mysql(
+            experiment_id=experiment_id,
+            run_case_ids=[run_case_id],
+            status=status,
+            allowed_from=allowed_from,
+            set_started_at=set_started_at,
+        )
+
+    def _update_case_status_mysql(
+        self,
+        *,
+        experiment_id: int,
+        run_case_ids: list[int],
+        status: str,
+        allowed_from: list[str] | None = None,
+        set_started_at: bool = False,
+    ) -> None:
+        if not run_case_ids:
+            return
         try:
             import pymysql  # type: ignore
         except Exception as exc:
             logger.warning("code=E_DB_DRIVER_FALLBACK driver=pymysql err=%s", exc)
-            self._mark_cases_running_mysql_cli(experiment_id=experiment_id, run_case_ids=run_case_ids)
+            self._update_case_status_mysql_cli(
+                experiment_id=experiment_id,
+                run_case_ids=run_case_ids,
+                status=status,
+                allowed_from=allowed_from,
+                set_started_at=set_started_at,
+            )
             return
 
         if not (self.settings.mysql_server and self.settings.mysql_user and self.settings.mysql_db):
@@ -422,25 +543,39 @@ class DbRepository:
         )
         try:
             with conn.cursor() as cur:
-                placeholders = ", ".join(["%s"] * len(run_case_ids))
+                id_placeholders = ", ".join(["%s"] * len(run_case_ids))
+                started_at_sql = "\n                           , started_at = IFNULL(started_at, CURRENT_TIMESTAMP)" if set_started_at else ""
+                allowed_sql = ""
+                params: list[Any] = [status, experiment_id, *run_case_ids]
+                if allowed_from:
+                    allowed_placeholders = ", ".join(["%s"] * len(allowed_from))
+                    allowed_sql = f" AND status IN ({allowed_placeholders})"
+                    params.extend(allowed_from)
                 cur.execute(
                     f"""
                     UPDATE run_cases
-                       SET status = 'running',
-                           started_at = IFNULL(started_at, CURRENT_TIMESTAMP),
+                       SET status = %s{started_at_sql},
                            updated_at = CURRENT_TIMESTAMP
                      WHERE experiment_id = %s
-                       AND id IN ({placeholders})
-                       AND status = 'pending'
+                       AND id IN ({id_placeholders})
+                       {allowed_sql}
                     """,
-                    [experiment_id, *run_case_ids],
+                    params,
                 )
                 self._refresh_experiment_status_mysql(cur, experiment_id)
             conn.commit()
         finally:
             conn.close()
 
-    def _mark_cases_running_mysql_cli(self, *, experiment_id: int, run_case_ids: list[int]) -> None:
+    def _update_case_status_mysql_cli(
+        self,
+        *,
+        experiment_id: int,
+        run_case_ids: list[int],
+        status: str,
+        allowed_from: list[str] | None = None,
+        set_started_at: bool = False,
+    ) -> None:
         if not (self.settings.mysql_server and self.settings.mysql_user and self.settings.mysql_db):
             raise RuntimeError("E_DB_CONFIG_MISSING: mysql env vars are not configured")
         if self.settings.mysql_password is None:
@@ -458,18 +593,39 @@ class DbRepository:
             return f"'{text}'"
 
         ids_sql = ", ".join(lit(v) for v in run_case_ids)
+        allowed_sql = ""
+        if allowed_from:
+            allowed_sql = f" AND status IN ({', '.join(lit(v) for v in allowed_from)})"
+        started_sql = ", started_at=IFNULL(started_at, CURRENT_TIMESTAMP)" if set_started_at else ""
         sql = (
             "START TRANSACTION;\n"
             "UPDATE run_cases SET "
-            "status='running', "
-            "started_at=IFNULL(started_at, CURRENT_TIMESTAMP), "
+            f"status={lit(status)}"
+            f"{started_sql}, "
             "updated_at=CURRENT_TIMESTAMP "
             f"WHERE experiment_id={lit(experiment_id)} "
             f"AND id IN ({ids_sql}) "
-            "AND status='pending';\n"
+            f"{allowed_sql};\n"
+            "SET @total=(SELECT COUNT(*) FROM run_cases WHERE experiment_id="
+            f"{lit(experiment_id)} AND is_latest=TRUE);\n"
+            "SET @running=(SELECT COALESCE(SUM(CASE WHEN status IN ('running','trajectory','scoring') THEN 1 ELSE 0 END),0) "
+            f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE);\n"
+            "SET @pending=(SELECT COALESCE(SUM(CASE WHEN status IN ('pending','queued') THEN 1 ELSE 0 END),0) "
+            f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE);\n"
+            "SET @success=(SELECT COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),0) "
+            f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE);\n"
+            "SET @failed=(SELECT COALESCE(SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END),0) "
+            f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE);\n"
+            "SET @run_status=(CASE "
+            "WHEN @total=0 THEN 'idle' "
+            "WHEN @running>0 OR @pending>0 THEN 'consuming' "
+            "WHEN @failed=0 THEN 'done' "
+            "WHEN @success=0 THEN 'failed' "
+            "ELSE 'done' END);\n"
             "UPDATE experiments SET "
-            "queue_status='consuming', "
-            "started_at=IF(started_at IS NULL, CURRENT_TIMESTAMP, started_at), "
+            "queue_status=@run_status, "
+            "started_at=IF(@run_status='consuming' AND started_at IS NULL, CURRENT_TIMESTAMP, started_at), "
+            "finished_at=IF(@run_status IN ('done','failed'), CURRENT_TIMESTAMP, finished_at), "
             "updated_at=CURRENT_TIMESTAMP "
             f"WHERE id={lit(experiment_id)};\n"
             "COMMIT;"
@@ -495,7 +651,7 @@ class DbRepository:
             env=env,
         )
         if proc.returncode != 0:
-            raise RuntimeError(f"E_DB_MARK_RUNNING_CLI: {proc.stderr.strip()}")
+            raise RuntimeError(f"E_DB_MARK_STATUS_CLI: {proc.stderr.strip()}")
 
     def _persist_case_result_mysql_cli(
         self,
@@ -573,11 +729,11 @@ class DbRepository:
                     f"{lit(experiment_id)} AND is_latest=TRUE)"
                 ),
                 (
-                    "SET @running=(SELECT COALESCE(SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),0) "
+                    "SET @running=(SELECT COALESCE(SUM(CASE WHEN status IN ('running','trajectory','scoring') THEN 1 ELSE 0 END),0) "
                     f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE)"
                 ),
                 (
-                    "SET @pending=(SELECT COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0) "
+                    "SET @pending=(SELECT COALESCE(SUM(CASE WHEN status IN ('pending','queued') THEN 1 ELSE 0 END),0) "
                     f"FROM run_cases WHERE experiment_id={lit(experiment_id)} AND is_latest=TRUE)"
                 ),
                 (
@@ -640,8 +796,8 @@ class DbRepository:
             """
             SELECT
               COUNT(*) AS total_count,
-              SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
-              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+              SUM(CASE WHEN status IN ('running','trajectory','scoring') THEN 1 ELSE 0 END) AS running_count,
+              SUM(CASE WHEN status IN ('pending','queued') THEN 1 ELSE 0 END) AS pending_count,
               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
               SUM(CASE WHEN status IN ('failed', 'timeout') THEN 1 ELSE 0 END) AS failed_count
             FROM run_cases

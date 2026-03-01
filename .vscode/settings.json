@@ -1,0 +1,5 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/consumer/.venv/bin/python",
+  "python.analysis.extraPaths": ["${workspaceFolder}/consumer/src"],
+  "python.analysis.typeCheckingMode": "basic"
+}

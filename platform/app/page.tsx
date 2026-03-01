@@ -5,14 +5,15 @@ import { AgentIcon, DatasetIcon, FlaskIcon, JudgeIcon, TraceIcon } from "./compo
 export default async function HomePage() {
   await requireUser();
 
-  const [datasets, items, agents, evaluators, experiments, runs, traces] = await Promise.all([
+  const [datasets, items, agents, evaluators, experiments, runs, traces, logs] = await Promise.all([
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM datasets WHERE deleted_at IS NULL"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM data_items WHERE deleted_at IS NULL"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM agents WHERE deleted_at IS NULL"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM evaluators WHERE deleted_at IS NULL"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM experiments WHERE deleted_at IS NULL"),
     dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM run_cases WHERE is_latest = TRUE"),
-    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM traces WHERE deleted_at IS NULL")
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM otel_traces WHERE deleted_at IS NULL"),
+    dbQuery<{ c: string }>("SELECT CAST(COUNT(*) AS CHAR) AS c FROM otel_logs WHERE deleted_at IS NULL")
   ]);
 
   const cards = [
@@ -22,7 +23,8 @@ export default async function HomePage() {
     { title: "启用评估器", value: evaluators.rows[0].c, icon: JudgeIcon },
     { title: "实验", value: experiments.rows[0].c, icon: FlaskIcon },
     { title: "运行", value: runs.rows[0].c, icon: FlaskIcon },
-    { title: "Trace", value: traces.rows[0].c, icon: TraceIcon }
+    { title: "OTEL Traces", value: traces.rows[0].c, icon: TraceIcon },
+    { title: "OTEL Logs", value: logs.rows[0].c, icon: TraceIcon }
   ];
 
   return (
@@ -47,9 +49,12 @@ export default async function HomePage() {
       <section className="card">
         <h2>OpenTelemetry 上报入口</h2>
         <p className="muted">
-          Endpoint: <code>POST /api/otel/v1/traces</code>
+          Traces: <code>POST /api/otel/v1/traces</code>
         </p>
-        <p className="muted">支持 OTLP JSON(resourceSpans) 与简化 spans JSON。</p>
+        <p className="muted">
+          Logs: <code>POST /api/otel/v1/logs</code>
+        </p>
+        <p className="muted">支持 OTLP JSON(resourceSpans/resourceLogs) 与简化 spans/logs JSON。</p>
       </section>
     </div>
   );

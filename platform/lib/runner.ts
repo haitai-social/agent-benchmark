@@ -103,10 +103,10 @@ async function updateExperimentStatus(tx: Tx, experimentId: number) {
   }>(
     `SELECT
        COUNT(*) AS total_count,
-       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
-       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+       SUM(CASE WHEN status IN ('running','trajectory','scoring') THEN 1 ELSE 0 END) AS running_count,
+       SUM(CASE WHEN status IN ('pending','queued') THEN 1 ELSE 0 END) AS pending_count,
        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+       SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END) AS failed_count
      FROM run_cases
      WHERE experiment_id = $1 AND is_latest = TRUE`,
     [experimentId]
@@ -592,7 +592,7 @@ export async function markExperimentFailed(experimentId: number, reason: string)
   await dbQuery(
     `UPDATE run_cases
      SET status = 'failed', error_message = $2, updated_at = CURRENT_TIMESTAMP
-     WHERE experiment_id = $1 AND is_latest = TRUE AND status IN ('pending', 'running')`,
+     WHERE experiment_id = $1 AND is_latest = TRUE AND status IN ('pending', 'queued', 'running', 'trajectory', 'scoring')`,
     [experimentId, reason]
   );
 }
@@ -634,7 +634,7 @@ export async function terminateExperiment(experimentId: number, terminatedBy: st
            updated_at = CURRENT_TIMESTAMP
        WHERE experiment_id = $1
          AND is_latest = TRUE
-         AND status IN ('pending', 'running')`,
+         AND status IN ('pending', 'queued', 'running', 'trajectory', 'scoring')`,
       [experimentId, reason]
     );
 

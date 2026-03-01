@@ -88,7 +88,7 @@ def _call_openai_compatible(
     prompt: str,
     timeout: float | tuple[float, float],
 ) -> tuple[float, str, dict[str, Any]]:
-    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+    endpoint = base_url.rstrip("/")
     response = requests.post(
         endpoint,
         headers={
@@ -125,7 +125,7 @@ def _call_anthropic(
     prompt: str,
     timeout: float | tuple[float, float],
 ) -> tuple[float, str, dict[str, Any]]:
-    endpoint = f"{base_url.rstrip('/')}/messages"
+    endpoint = base_url.rstrip("/")
     response = requests.post(
         endpoint,
         headers={
@@ -142,46 +142,16 @@ def _call_anthropic(
         },
         timeout=timeout,
     )
-    if response.ok:
-        body = response.json()
-        raw_content = ""
-        if isinstance(body, dict):
-            items = body.get("content")
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict) and isinstance(item.get("text"), str):
-                        raw_content = item["text"]
-                        break
-        score, reason = _extract_score(raw_content)
-        return score, reason, body
-
-    # Some "anthropic-style" providers still expose OpenAI-compatible completions.
-    fallback_endpoint = f"{base_url.rstrip('/')}/chat/completions"
-    fallback = requests.post(
-        fallback_endpoint,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "x-api-key": api_key,
-        },
-        json={
-            "model": model_name,
-            "temperature": 0,
-            "messages": [
-                {"role": "system", "content": "Return JSON only: {\"score\":0|0.5|1,\"reason\":\"...\"}"},
-                {"role": "user", "content": prompt},
-            ],
-            "response_format": {"type": "json_object"},
-        },
-        timeout=timeout,
-    )
-    fallback.raise_for_status()
-    body = fallback.json()
-    raw_content = (
-        ((body.get("choices") or [{}])[0].get("message") or {}).get("content")
-        if isinstance(body, dict)
-        else None
-    )
+    response.raise_for_status()
+    body = response.json()
+    raw_content = ""
+    if isinstance(body, dict):
+        items = body.get("content")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    raw_content = item["text"]
+                    break
     score, reason = _extract_score(raw_content)
     return score, reason, body
 
@@ -216,6 +186,9 @@ def _extract_score(raw_content: Any) -> tuple[float, str]:
         return -1.0, f"E_EVALUATOR_INVALID_JSON: {raw_content[:200]}"
     score = parsed.get("score")
     reason = str(parsed.get("reason") or "no reason provided")
+    if score is None:
+        return -1.0, f"E_EVALUATOR_SCORE_MISSING: {reason}"
+
     if score in (0, 0.5, 1):
         return float(score), reason
     try:

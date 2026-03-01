@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbQuery } from "@/lib/db";
+import { formatDateTime } from "@/lib/datetime";
 import { PaginationControls } from "@/app/components/pagination-controls";
 import { clampPage, getOffset, parsePage, parsePageSize } from "@/lib/pagination";
 import { requireUser } from "@/lib/supabase-auth";
@@ -10,6 +11,7 @@ import { ArrowLeftIcon, FilterIcon, FlaskIcon, SearchIcon } from "@/app/componen
 import { SubmitButton } from "@/app/components/submit-button";
 import { EntityDrawer } from "@/app/components/entity-drawer";
 import { DevToastButton } from "@/app/components/dev-toast-button";
+import { ExpandableTextCell } from "@/app/components/expandable-text-cell";
 
 function formatDuration(startedAt: string | null, finishedAt: string | null) {
   if (!startedAt || !finishedAt) return "-";
@@ -170,8 +172,8 @@ export default async function ExperimentDetailPage({
           COUNT(*) AS total_count,
           SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
           SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END) AS failed_count,
-          SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
-          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count
+          SUM(CASE WHEN status IN ('running','trajectory','scoring') THEN 1 ELSE 0 END) AS running_count,
+          SUM(CASE WHEN status IN ('pending','queued') THEN 1 ELSE 0 END) AS pending_count
        FROM run_cases
        WHERE experiment_id = $1 AND is_latest = TRUE`,
       [id]
@@ -452,7 +454,7 @@ export default async function ExperimentDetailPage({
           ) : null}
 
           <section className="card table-card">
-            <table>
+            <table className="exp-runcase-table">
               <thead>
                 <tr>
                   <th>状态</th>
@@ -474,10 +476,18 @@ export default async function ExperimentDetailPage({
                     <td>
                       <code>#{row.id}</code>
                     </td>
-                    <td className="exp-table-cell-truncate">{row.user_input || "-"}</td>
-                    <td className="exp-table-cell-truncate">{JSON.stringify(row.reference_output ?? {}).slice(0, 120) || "-"}</td>
-                    <td className="exp-table-cell-truncate">{JSON.stringify(row.agent_trajectory ?? []).slice(0, 120) || "-"}</td>
-                    <td className="exp-table-cell-truncate">{JSON.stringify(row.agent_output ?? {}).slice(0, 120) || "-"}</td>
+                    <td>
+                      <ExpandableTextCell value={row.user_input} previewLength={120} className="exp-table-cell-truncate" />
+                    </td>
+                    <td>
+                      <ExpandableTextCell value={row.reference_output ?? {}} previewLength={120} className="exp-table-cell-truncate" />
+                    </td>
+                    <td>
+                      <ExpandableTextCell value={row.agent_trajectory ?? []} previewLength={120} className="exp-table-cell-truncate" />
+                    </td>
+                    <td>
+                      <ExpandableTextCell value={row.agent_output ?? {}} previewLength={120} className="exp-table-cell-truncate" />
+                    </td>
                     <td>{row.final_score ?? "-"}</td>
                     <td>
                       <Link
@@ -638,15 +648,15 @@ export default async function ExperimentDetailPage({
               </div>
               <div className="exp-config-item">
                 <dt>创建时间</dt>
-                <dd>{new Date(e.created_at).toLocaleString()}</dd>
+                <dd>{formatDateTime(e.created_at)}</dd>
               </div>
               <div className="exp-config-item">
                 <dt>开始时间</dt>
-                <dd>{e.started_at ? new Date(e.started_at).toLocaleString() : "-"}</dd>
+                <dd>{formatDateTime(e.started_at)}</dd>
               </div>
               <div className="exp-config-item">
                 <dt>结束时间</dt>
-                <dd>{e.finished_at ? new Date(e.finished_at).toLocaleString() : "-"}</dd>
+                <dd>{formatDateTime(e.finished_at)}</dd>
               </div>
               <div className="exp-config-item">
                 <dt>实验时长</dt>
@@ -654,7 +664,7 @@ export default async function ExperimentDetailPage({
               </div>
               <div className="exp-config-item">
                 <dt>入队时间</dt>
-                <dd>{e.queued_at ? new Date(e.queued_at).toLocaleString() : "-"}</dd>
+                <dd>{formatDateTime(e.queued_at)}</dd>
               </div>
               <div className="exp-config-item">
                 <dt>Message ID</dt>
@@ -768,8 +778,8 @@ export default async function ExperimentDetailPage({
                     <tr key={row.evaluator_name}>
                       <td>{row.evaluator_name}</td>
                       <td>{row.score}</td>
-                      <td className="exp-eval-reason-cell" title={row.reason || "-"}>
-                        {row.reason || "-"}
+                      <td>
+                        <ExpandableTextCell value={row.reason || "-"} previewLength={220} className="exp-eval-reason-cell" />
                       </td>
                     </tr>
                   ))}
@@ -786,7 +796,7 @@ export default async function ExperimentDetailPage({
                     <span>attempt {row.attempt_no}</span>
                     <span className={`status-pill ${row.status}`}>{row.status}</span>
                     <span className="muted">score: {row.final_score ?? "-"}</span>
-                    <span className="muted">{new Date(row.updated_at).toLocaleString()}</span>
+                    <span className="muted">{formatDateTime(row.updated_at)}</span>
                   </div>
                 ))}
               </div>

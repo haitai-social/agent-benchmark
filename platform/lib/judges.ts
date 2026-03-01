@@ -54,7 +54,7 @@ function heuristicScore(key: string, input: JudgeInput): JudgeResult {
 async function openAiJudge(evaluator: Evaluator, input: JudgeInput): Promise<JudgeResult | null> {
   const apiKey = evaluator.api_key || process.env.OPENAI_API_KEY;
   const model = evaluator.model_name || process.env.JUDGE_MODEL || "gpt-4.1-mini";
-  const baseUrl = (evaluator.base_url || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const baseUrl = (evaluator.base_url || "https://api.openai.com/v1").trim();
   if (!apiKey) return null;
 
   try {
@@ -63,7 +63,7 @@ async function openAiJudge(evaluator: Evaluator, input: JudgeInput): Promise<Jud
       .replace("{{agent_output}}", JSON.stringify(input.agentOutput, null, 2))
       .replace("{{tools}}", JSON.stringify(input.tools, null, 2));
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await fetch(baseUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
