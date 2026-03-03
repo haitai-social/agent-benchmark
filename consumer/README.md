@@ -191,6 +191,15 @@ ACCEPTANCE_AGENT_VERSION=2026.2.26-otel-v1 \
 ./scripts/e2e_experiments_openclaw.sh
 ```
 
+3. Agno Agent
+
+```bash
+cd consumer
+ACCEPTANCE_AGENT_KEY=agno-otel-cli \
+ACCEPTANCE_AGENT_VERSION=2026.3.1-otel-v1 \
+./scripts/e2e_experiments_agno.sh
+```
+
 ## 测试
 
 ```bash
