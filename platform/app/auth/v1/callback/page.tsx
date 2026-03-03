@@ -65,7 +65,7 @@ export default function AuthCallbackPage() {
           <DotIcon width={14} height={14} />
           {status === "loading" ? "登录处理中" : status === "success" ? "即将进入平台" : "登录未完成"}
         </div>
-        <h1>{status === "error" ? "登录没有完成" : "正在进入 Agent Benchmark 平台"}</h1>
+        <h1>{status === "error" ? "登录没有完成" : "正在进入 Arcploop 平台"}</h1>
         <p>{message}</p>
 
         <div className="callback-steps">

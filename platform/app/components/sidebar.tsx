@@ -38,7 +38,7 @@ export function Sidebar({
       <div className="brand">
         <div className="brand-badge">AB</div>
         <div className="brand-copy">
-          <div className="brand-title">Agent Benchmark</div>
+          <div className="brand-title">Arcploop</div>
           <div className="brand-sub">Control Platform</div>
         </div>
         <button

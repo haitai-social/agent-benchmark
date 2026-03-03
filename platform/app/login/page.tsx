@@ -30,7 +30,7 @@ export default async function LoginPage({
       <section className="login-card login-card-v3">
         <div className="login-main-grid">
           <div className="login-copy">
-            <h1>Agent Benchmark</h1>
+            <h1>Arcploop</h1>
             <p className="login-lead">
               一站式管理评测集、评估器、OTEL 与实验任务，
               <span className="nowrap-cn">清晰对比</span>每次版本迭代的效果变化，并基于统一视图快速定位问题样本、验证优化是否真正生效。
@@ -55,7 +55,7 @@ export default async function LoginPage({
 
           <aside className="login-auth-pane">
             <div className="login-auth-logo">
-              <Image src={brandLogo} alt="Agent Benchmark" width={40} height={40} />
+              <Image src={brandLogo} alt="Arcploop" width={40} height={40} />
             </div>
             <h2>登录 HaitAI</h2>
             <p>选择你的账号继续访问</p>

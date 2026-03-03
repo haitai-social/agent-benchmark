@@ -4,7 +4,7 @@ import { AppShell } from "./components/app-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Agent Benchmark Platform",
+  title: "Arcploop Platform",
   description: "Benchmark 管理/运行平台"
 };
 
