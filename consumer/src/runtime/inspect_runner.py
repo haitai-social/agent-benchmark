@@ -34,6 +34,8 @@ DEFAULT_EVALUATOR_MAX_RETRIES = 2
 DEFAULT_EVALUATOR_RETRY_BACKOFF_SECONDS = 1.0
 INSPECT_HEARTBEAT_SECONDS = 10
 INSPECT_STUCK_WARN_SECONDS = 90
+OTEL_COLLECT_RETRY_TIMEOUT_SECONDS = 8.0
+OTEL_COLLECT_RETRY_INTERVAL_SECONDS = 0.5
 
 
 class InspectRunner:
@@ -889,28 +891,56 @@ class InspectRunner:
         return DEFAULT_SCORE_SENTINEL, "E_SCORE_DEFAULT_EVALUATOR_CONFIG_MISSING", {"source": "default"}
 
     def _collect_trajectory_from_otel(self, *, run_case_id: int) -> list[dict[str, Any]]:
-        now_ms = int(time.time() * 1000)
-        try:
-            logs = self.trace_repo.fetch_logs_by_run_case(
-                run_case_id=run_case_id,
-                start_ms=now_ms - 15 * 60 * 1000,
-                end_ms=now_ms + 60 * 1000,
-                limit=4000,
-            )
-            mapped_logs = map_logs_to_trajectory(logs)
-            if mapped_logs:
-                return mapped_logs
+        deadline = time.time() + OTEL_COLLECT_RETRY_TIMEOUT_SECONDS
+        attempt = 0
+        while True:
+            attempt += 1
+            now_ms = int(time.time() * 1000)
+            try:
+                logs = self.trace_repo.fetch_logs_by_run_case(
+                    run_case_id=run_case_id,
+                    start_ms=now_ms - 15 * 60 * 1000,
+                    end_ms=now_ms + 60 * 1000,
+                    limit=4000,
+                )
+                mapped_logs = map_logs_to_trajectory(logs)
+                if mapped_logs:
+                    logger.info(
+                        "code=OTEL_QUERY_OK signal=logs run_case_id=%s attempt=%s rows=%s",
+                        run_case_id,
+                        attempt,
+                        len(mapped_logs),
+                    )
+                    return mapped_logs
 
-            spans = self.trace_repo.fetch_spans_by_run_case(
-                run_case_id=run_case_id,
-                start_ms=now_ms - 15 * 60 * 1000,
-                end_ms=now_ms + 60 * 1000,
-                limit=2000,
-            )
-            return map_spans_to_trajectory(spans)
-        except Exception as exc:
-            logger.warning("code=E_OTEL_QUERY_FAILED run_case_id=%s err=%s", run_case_id, exc)
-            return []
+                spans = self.trace_repo.fetch_spans_by_run_case(
+                    run_case_id=run_case_id,
+                    start_ms=now_ms - 15 * 60 * 1000,
+                    end_ms=now_ms + 60 * 1000,
+                    limit=2000,
+                )
+                mapped_spans = map_spans_to_trajectory(spans)
+                if mapped_spans:
+                    logger.info(
+                        "code=OTEL_QUERY_OK signal=traces run_case_id=%s attempt=%s rows=%s",
+                        run_case_id,
+                        attempt,
+                        len(mapped_spans),
+                    )
+                    return mapped_spans
+            except Exception as exc:
+                logger.warning("code=E_OTEL_QUERY_FAILED run_case_id=%s attempt=%s err=%s", run_case_id, attempt, exc)
+                return []
+
+            if time.time() >= deadline:
+                logger.warning(
+                    "code=E_OTEL_QUERY_EMPTY run_case_id=%s attempts=%s timeout_s=%s",
+                    run_case_id,
+                    attempt,
+                    OTEL_COLLECT_RETRY_TIMEOUT_SECONDS,
+                )
+                return []
+            time.sleep(OTEL_COLLECT_RETRY_INTERVAL_SECONDS)
 
     def _as_int(self, preferred: Any, default: int) -> int:
         if preferred is not None and str(preferred).strip() != "":

@@ -43,6 +43,9 @@ class _NoopLock:
 # Mapping note for OpenClaw E2E:
 # `openclaw-otel-cli` should use image `ghcr.io/haitai-social/agent-benchmark:openclaw-otel-demo`,
 # which is built from `tests/openclaw-otel-demo/Dockerfile`.
+# Mapping note for Agno E2E:
+# `agno-otel-cli` should use image `ghcr.io/haitai-social/agent-benchmark:agno-otel-demo`,
+# which is built from `tests/agno-otel-demo/Dockerfile`.
 MOCK_AGENT_KEY = os.getenv("ACCEPTANCE_AGENT_KEY", "mock-output-and-otel")
 MOCK_AGENT_VERSION = os.getenv("ACCEPTANCE_AGENT_VERSION", "v1")
 MOCK_AGENT_NAME = os.getenv("ACCEPTANCE_AGENT_NAME", "")
@@ -206,7 +209,26 @@ def _create_dispatch_with_mock_agent(*, settings: Settings, options: E2EOptions)
 
             cur.execute(
                 """
-                SELECT id, session_jsonl, user_input, trace_id, reference_trajectory, reference_output
+                SELECT COLUMN_NAME
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'data_items'
+                  AND COLUMN_NAME IN ('trace_id', 'reference_trajectory', 'reference_output')
+                """
+            )
+            existing_columns = {str(cast(dict[str, Any], row).get("COLUMN_NAME") or "") for row in (cur.fetchall() or [])}
+
+            trace_id_expr = "trace_id" if "trace_id" in existing_columns else "NULL AS trace_id"
+            ref_traj_expr = (
+                "reference_trajectory"
+                if "reference_trajectory" in existing_columns
+                else "NULL AS reference_trajectory"
+            )
+            ref_output_expr = "reference_output" if "reference_output" in existing_columns else "NULL AS reference_output"
+
+            cur.execute(
+                f"""
+                SELECT id, session_jsonl, user_input, {trace_id_expr}, {ref_traj_expr}, {ref_output_expr}
                 FROM data_items
                 WHERE dataset_id = %s AND deleted_at IS NULL
                 ORDER BY created_at ASC
